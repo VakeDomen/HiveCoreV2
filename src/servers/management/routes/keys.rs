@@ -120,7 +120,6 @@ fn json_response(status: u16, reason: &'static str, value: Value) -> HttpRespons
 struct KeyResponse {
     id: i64,
     token: String,
-    value: String,
     role: Role,
     name: String,
     whitelist_models: Vec<String>,
@@ -132,7 +131,6 @@ impl From<KeyRecord> for KeyResponse {
         Self {
             id: value.id,
             token: value.token.clone(),
-            value: value.token,
             role: value.role,
             name: value.name,
             whitelist_models: value.whitelist_models,

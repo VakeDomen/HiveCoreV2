@@ -559,4 +559,38 @@ mod tests {
         cleanup(&db);
         Ok(())
     }
+
+    #[test]
+    fn tags_keeps_latest_alias_visible_for_bare_whitelist() -> io::Result<()> {
+        let (mut state, db) = test_state("masked_tags_latest_alias")?;
+        let token = "token".to_string();
+        let key = state.keys.insert(
+            token,
+            crate::auth::Role::Client,
+            "alice".to_string(),
+            vec!["bge-m3".to_string()],
+            Vec::new(),
+        )?;
+        let mut workers = HashMap::new();
+        workers.insert(
+            "worker-a".to_string(),
+            WorkerStatus {
+                model_catalog: Some(json!({"models":[{"name":"bge-m3:latest"}]})),
+                ..worker_status("worker-a", vec!["bge-m3"])
+            },
+        );
+        state.workers = RwLock::new(workers);
+        let req = request("GET", "/api/tags", b"");
+        match plan_request(&state, &req, Some(&key)) {
+            RoutePlan::Local(response) => {
+                let value: Value = serde_json::from_slice(&response.body).expect("json");
+                let models = value["models"].as_array().expect("models");
+                assert_eq!(models.len(), 1);
+                assert_eq!(models[0]["name"], "bge-m3:latest");
+            }
+            _ => panic!("expected local aggregate"),
+        }
+        cleanup(&db);
+        Ok(())
+    }
 }

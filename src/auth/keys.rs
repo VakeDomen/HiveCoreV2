@@ -354,4 +354,50 @@ mod tests {
         assert!(record.allows_model("llama3"));
         assert!(!record.allows_model("forbidden"));
     }
+
+    #[test]
+    fn bare_rule_matches_tagged_variants() {
+        let record = KeyRecord {
+            id: 1,
+            token: Uuid::new_v4().to_string(),
+            role: Role::Client,
+            name: "alice".to_string(),
+            whitelist_models: vec!["bge-m3".to_string()],
+            blacklist_models: Vec::new(),
+        };
+
+        assert!(record.allows_model("bge-m3"));
+        assert!(record.allows_model("bge-m3:latest"));
+    }
+
+    #[test]
+    fn latest_rule_matches_bare_alias() {
+        let record = KeyRecord {
+            id: 1,
+            token: Uuid::new_v4().to_string(),
+            role: Role::Client,
+            name: "alice".to_string(),
+            whitelist_models: vec!["bge-m3:latest".to_string()],
+            blacklist_models: Vec::new(),
+        };
+
+        assert!(record.allows_model("bge-m3"));
+        assert!(record.allows_model("bge-m3:latest"));
+        assert!(!record.allows_model("bge-m3:fp16"));
+    }
+
+    #[test]
+    fn bare_blacklist_blocks_tagged_variants() {
+        let record = KeyRecord {
+            id: 1,
+            token: Uuid::new_v4().to_string(),
+            role: Role::Client,
+            name: "alice".to_string(),
+            whitelist_models: Vec::new(),
+            blacklist_models: vec!["bge-m3".to_string()],
+        };
+
+        assert!(!record.allows_model("bge-m3"));
+        assert!(!record.allows_model("bge-m3:latest"));
+    }
 }

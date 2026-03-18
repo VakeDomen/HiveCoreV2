@@ -229,6 +229,25 @@ mod tests {
     }
 
     #[test]
+    fn accepts_request_when_bare_whitelist_allows_latest_alias() -> io::Result<()> {
+        let (state, db_path) = test_state("whitelist_latest_alias", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            vec!["bge-m3".to_string()],
+            Vec::new(),
+        )?;
+        let request = request_with_auth(Some(&token), br#"{"model":"bge-m3:latest"}"#);
+
+        assert_eq!(authorize_request(&state, &request), Ok(()));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_request_when_model_not_in_whitelist() -> io::Result<()> {
         let (state, db_path) = test_state("whitelist_reject", true)?;
         let token = Uuid::new_v4().to_string();
