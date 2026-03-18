@@ -5,6 +5,7 @@ use std::thread;
 
 use crate::app::AppState;
 use crate::servers::proxy::admission::authorize_request;
+use crate::servers::proxy::admission::authorized_key;
 use crate::servers::proxy::models::client_task::ClientTask;
 use crate::servers::proxy::models::response_target::ResponseTarget;
 use crate::servers::proxy::models::route_plan::RoutePlan;
@@ -51,8 +52,9 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
 
     let request_method = request.method.clone();
     let request_uri = request.uri.clone();
+    let visible_key = authorized_key(&state, &request);
 
-    match plan_request(&state, &request) {
+    match plan_request(&state, &request, visible_key.as_ref()) {
         RoutePlan::Local(response) => response.write_to(&mut stream),
         RoutePlan::Reject {
             status,

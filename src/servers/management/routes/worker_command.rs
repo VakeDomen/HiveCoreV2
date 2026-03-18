@@ -26,7 +26,11 @@ pub fn post_worker_command(state: &AppState, request: &HttpRequest) -> HttpRespo
         request: synthetic,
         response_target: ResponseTarget::Ignore,
     };
-    if state.request_queue.enqueue_to_node(payload.worker, task).is_ok() {
+    if state
+        .request_queue
+        .enqueue_to_node(payload.worker, task)
+        .is_ok()
+    {
         log::info("accepted worker command");
         HttpResponse::new(202, "Accepted", Vec::new())
     } else {

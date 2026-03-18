@@ -71,6 +71,34 @@ extract_first_worker_model() {
     ' "${file}"
 }
 
+extract_distinct_worker_model() {
+    local worker_name="$1"
+    local exclude_model="$2"
+    local file="$3"
+    awk -v worker="${worker_name}" -v exclude="${exclude_model}" '
+        index($0, "\"" worker "\":[") {
+            match($0, "\"" worker "\":\\[[^]]*\\]")
+            if (RSTART > 0) {
+                entry = substr($0, RSTART, RLENGTH)
+                sub("^\"" worker "\":\\[", "", entry)
+                sub("\\]$", "", entry)
+                if (entry == "") {
+                    exit
+                }
+                n = split(entry, parts, ",")
+                for (i = 1; i <= n; i++) {
+                    gsub(/^"/, "", parts[i])
+                    gsub(/"$/, "", parts[i])
+                    if (parts[i] != "" && parts[i] != exclude) {
+                        print parts[i]
+                        exit
+                    }
+                }
+            }
+        }
+    ' "${file}"
+}
+
 expect_status() {
     local actual="$1"
     local expected="$2"
@@ -148,6 +176,37 @@ client_generate() {
         "${PROXY_BASE}/api/generate"
 }
 
+client_json_request() {
+    local token="$1"
+    local method="$2"
+    local path="$3"
+    local body="$4"
+    local output_file="$5"
+
+    curl -sS \
+        --max-time "${TIMEOUT_SECONDS}" \
+        -X "${method}" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${token}" \
+        -d "${body}" \
+        -o "${output_file}" \
+        -w "%{http_code}" \
+        "${PROXY_BASE}${path}"
+}
+
+client_get_request() {
+    local token="$1"
+    local path="$2"
+    local output_file="$3"
+
+    curl -sS \
+        --max-time "${TIMEOUT_SECONDS}" \
+        -H "Authorization: Bearer ${token}" \
+        -o "${output_file}" \
+        -w "%{http_code}" \
+        "${PROXY_BASE}${path}"
+}
+
 pull_model_to_worker() {
     local model="$1"
     local output_file="$2"
@@ -220,6 +279,7 @@ if [[ -n "${TEST_MODEL}" && "${TEST_MODEL}" != "${resolved_model}" ]]; then
 fi
 
 echo "Using test model: ${resolved_model}"
+hidden_model="$(extract_distinct_worker_model "${WORKER_NAME}" "${resolved_model}" "${tmpdir}/worker_tags.json" || true)"
 
 if [[ -n "${resolved_model}" ]]; then
     step "Create whitelist-limited client key"
@@ -232,6 +292,30 @@ if [[ -n "${resolved_model}" ]]; then
     status="$(client_generate "${allowed_token}" "${resolved_model}" "${tmpdir}/allowed_generate.json")"
     expect_status "${status}" "200" "allowed generate request"
     contains_text '"response"' "${tmpdir}/allowed_generate.json" || contains_text '"done"' "${tmpdir}/allowed_generate.json" || fail "generate response missing expected Ollama fields"
+
+    step "Verify model masking on discovery routes"
+    status="$(client_get_request "${allowed_token}" "/api/tags" "${tmpdir}/allowed_tags.json")"
+    expect_status "${status}" "200" "allowed key /api/tags request"
+    contains_text "\"${resolved_model}\"" "${tmpdir}/allowed_tags.json" || fail "allowed key cannot see its whitelisted model in /api/tags"
+    if [[ -n "${hidden_model}" ]]; then
+        if contains_text "\"${hidden_model}\"" "${tmpdir}/allowed_tags.json"; then
+            fail "allowed key can see hidden model ${hidden_model} in /api/tags"
+        fi
+    fi
+
+    status="$(client_get_request "${allowed_token}" "/api/ps" "${tmpdir}/allowed_ps.json")"
+    expect_status "${status}" "200" "allowed key /api/ps request"
+    if [[ -n "${hidden_model}" ]]; then
+        if contains_text "\"${hidden_model}\"" "${tmpdir}/allowed_ps.json"; then
+            fail "allowed key can see hidden model ${hidden_model} in /api/ps"
+        fi
+    fi
+
+    if [[ -n "${hidden_model}" ]]; then
+        step "Verify hidden model access is blocked"
+        status="$(client_json_request "${allowed_token}" "POST" "/api/show" "{\"model\":\"${hidden_model}\"}" "${tmpdir}/hidden_show.json")"
+        expect_status "${status}" "403" "hidden model show request"
+    fi
 
     step "Create blacklist-limited client key"
     denied_name="${CLIENT_KEY_NAME_PREFIX}-denied-$(date +%s)"

@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::app::AppState;
+use crate::auth::KeyRecord;
 use crate::shared::http::{HttpRequest, HttpResponse};
 use crate::shared::log;
 
@@ -28,7 +29,11 @@ enum ProxyEndpoint {
     Unknown,
 }
 
-pub fn plan_request(state: &AppState, request: &HttpRequest) -> RoutePlan {
+pub fn plan_request(
+    state: &AppState,
+    request: &HttpRequest,
+    visible_key: Option<&KeyRecord>,
+) -> RoutePlan {
     if request.protocol == "HIVE" {
         return RoutePlan::Reject {
             status: 405,
@@ -45,15 +50,15 @@ pub fn plan_request(state: &AppState, request: &HttpRequest) -> RoutePlan {
         ProxyEndpoint::Generate | ProxyEndpoint::Chat | ProxyEndpoint::Embed => {
             route_by_required_model(request)
         }
-        ProxyEndpoint::Tags => local_tags_response(state),
-        ProxyEndpoint::Ps => local_ps_response(state),
+        ProxyEndpoint::Tags => local_tags_response(state, visible_key),
+        ProxyEndpoint::Ps => local_ps_response(state, visible_key),
         ProxyEndpoint::Version => local_version_response(state),
-        ProxyEndpoint::Show => route_show_request(state, request),
-        ProxyEndpoint::Create => route_create_request(state, request),
-        ProxyEndpoint::Copy => route_copy_request(state, request),
+        ProxyEndpoint::Show => route_show_request(state, request, visible_key),
+        ProxyEndpoint::Create => route_create_request(state, request, visible_key),
+        ProxyEndpoint::Copy => route_copy_request(state, request, visible_key),
         ProxyEndpoint::Pull => route_pull_request(state),
-        ProxyEndpoint::Push => route_push_request(state, request),
-        ProxyEndpoint::Delete => route_delete_request(state, request),
+        ProxyEndpoint::Push => route_push_request(state, request, visible_key),
+        ProxyEndpoint::Delete => route_delete_request(state, request, visible_key),
         ProxyEndpoint::Unknown => RoutePlan::Reject {
             status: 404,
             reason: "Not Found",
@@ -87,14 +92,25 @@ fn route_by_required_model(request: &HttpRequest) -> RoutePlan {
     }
 }
 
-fn route_show_request(state: &AppState, request: &HttpRequest) -> RoutePlan {
+fn route_show_request(
+    state: &AppState,
+    request: &HttpRequest,
+    visible_key: Option<&KeyRecord>,
+) -> RoutePlan {
     let Some(model) = json_string_field(&request.body, "model") else {
         return missing_field("model");
     };
+    if !model_visible(visible_key, &model) {
+        return not_found_for_masked_model();
+    }
     route_to_owner(state, &model)
 }
 
-fn route_create_request(state: &AppState, request: &HttpRequest) -> RoutePlan {
+fn route_create_request(
+    state: &AppState,
+    request: &HttpRequest,
+    visible_key: Option<&KeyRecord>,
+) -> RoutePlan {
     let Some(from) = json_string_field(&request.body, "from") else {
         return RoutePlan::Reject {
             status: 400,
@@ -102,13 +118,23 @@ fn route_create_request(state: &AppState, request: &HttpRequest) -> RoutePlan {
             message: "create without a source model requires a Node header",
         };
     };
+    if !model_visible(visible_key, &from) {
+        return not_found_for_masked_model();
+    }
     route_to_owner(state, &from)
 }
 
-fn route_copy_request(state: &AppState, request: &HttpRequest) -> RoutePlan {
+fn route_copy_request(
+    state: &AppState,
+    request: &HttpRequest,
+    visible_key: Option<&KeyRecord>,
+) -> RoutePlan {
     let Some(source) = json_string_field(&request.body, "source") else {
         return missing_field("source");
     };
+    if !model_visible(visible_key, &source) {
+        return not_found_for_masked_model();
+    }
     route_to_owner(state, &source)
 }
 
@@ -120,17 +146,31 @@ fn route_pull_request(state: &AppState) -> RoutePlan {
     RoutePlan::QueueByNode(workers[0].clone())
 }
 
-fn route_push_request(state: &AppState, request: &HttpRequest) -> RoutePlan {
+fn route_push_request(
+    state: &AppState,
+    request: &HttpRequest,
+    visible_key: Option<&KeyRecord>,
+) -> RoutePlan {
     let Some(model) = json_string_field(&request.body, "model") else {
         return missing_field("model");
     };
+    if !model_visible(visible_key, &model) {
+        return not_found_for_masked_model();
+    }
     route_to_owner(state, &model)
 }
 
-fn route_delete_request(state: &AppState, request: &HttpRequest) -> RoutePlan {
+fn route_delete_request(
+    state: &AppState,
+    request: &HttpRequest,
+    visible_key: Option<&KeyRecord>,
+) -> RoutePlan {
     let Some(model) = json_string_field(&request.body, "model") else {
         return missing_field("model");
     };
+    if !model_visible(visible_key, &model) {
+        return not_found_for_masked_model();
+    }
     let owners = model_owners(state, &model);
     if owners.is_empty() {
         return no_workers_available();
@@ -150,7 +190,7 @@ fn route_to_owner(state: &AppState, model: &str) -> RoutePlan {
     RoutePlan::QueueByNode(owners[0].clone())
 }
 
-fn local_tags_response(state: &AppState) -> RoutePlan {
+fn local_tags_response(state: &AppState, visible_key: Option<&KeyRecord>) -> RoutePlan {
     let workers = connected_workers(state);
     if workers.is_empty() {
         return RoutePlan::Local(json_response(json!({ "models": [] })));
@@ -161,6 +201,9 @@ fn local_tags_response(state: &AppState) -> RoutePlan {
         if let Some(models) = value.get("models").and_then(Value::as_array) {
             for model in models {
                 if let Some(name) = model.get("name").and_then(Value::as_str) {
+                    if !model_visible(visible_key, name) {
+                        continue;
+                    }
                     by_name.entry(name.to_string()).or_insert_with(|| model.clone());
                 }
             }
@@ -172,7 +215,7 @@ fn local_tags_response(state: &AppState) -> RoutePlan {
     })))
 }
 
-fn local_ps_response(state: &AppState) -> RoutePlan {
+fn local_ps_response(state: &AppState, visible_key: Option<&KeyRecord>) -> RoutePlan {
     let workers = connected_workers(state);
     if workers.is_empty() {
         return RoutePlan::Local(json_response(json!({ "models": [] })));
@@ -183,6 +226,12 @@ fn local_ps_response(state: &AppState) -> RoutePlan {
     for value in parallel_probe_json(state, workers, "/api/ps", None) {
         if let Some(entries) = value.get("models").and_then(Value::as_array) {
             for model in entries {
+                let Some(name) = model.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                if !model_visible(visible_key, name) {
+                    continue;
+                }
                 let key = model
                     .get("name")
                     .and_then(Value::as_str)
@@ -262,6 +311,18 @@ fn no_workers_available() -> RoutePlan {
     }
 }
 
+fn not_found_for_masked_model() -> RoutePlan {
+    RoutePlan::Reject {
+        status: 404,
+        reason: "Not Found",
+        message: "no connected worker advertises the requested model",
+    }
+}
+
+fn model_visible(key: Option<&KeyRecord>, model: &str) -> bool {
+    key.map(|key| key.allows_model(model)).unwrap_or(true)
+}
+
 fn json_string_field(body: &[u8], field: &str) -> Option<String> {
     serde_json::from_slice::<Value>(body)
         .ok()
@@ -334,7 +395,7 @@ mod tests {
     use std::sync::RwLock;
     use std::time::Instant;
 
-    use serde_json::json;
+    use serde_json::{Value, json};
     use uuid::Uuid;
 
     use crate::app::{AppState, Config};
@@ -393,7 +454,7 @@ mod tests {
     fn generate_routes_by_model() -> io::Result<()> {
         let (state, db) = test_state("generate")?;
         let req = request("POST", "/api/generate", br#"{"model":"llama3"}"#);
-        match plan_request(&state, &req) {
+        match plan_request(&state, &req, None) {
             RoutePlan::QueueByModel(model) => assert_eq!(model, "llama3"),
             _ => panic!("expected model route"),
         }
@@ -408,7 +469,7 @@ mod tests {
         workers.insert("worker-a".to_string(), worker_status("worker-a", vec!["llama3"]));
         state.workers = RwLock::new(workers);
         let req = request("GET", "/api/tags", b"");
-        match plan_request(&state, &req) {
+        match plan_request(&state, &req, None) {
             RoutePlan::Local(response) => assert_eq!(response.status_code, 200),
             _ => panic!("expected local aggregate"),
         }
@@ -423,7 +484,7 @@ mod tests {
         workers.insert("worker-a".to_string(), worker_status("worker-a", vec!["llama3"]));
         state.workers = RwLock::new(workers);
         let req = request("POST", "/api/copy", br#"{"source":"llama3","destination":"copy"}"#);
-        match plan_request(&state, &req) {
+        match plan_request(&state, &req, None) {
             RoutePlan::QueueByNode(worker) => assert_eq!(worker, "worker-a"),
             _ => panic!("expected node route"),
         }
@@ -439,7 +500,7 @@ mod tests {
         workers.insert("b".to_string(), worker_status("b", vec![]));
         state.workers = RwLock::new(workers);
         let req = request("POST", "/api/pull", br#"{"model":"llama3"}"#);
-        match plan_request(&state, &req) {
+        match plan_request(&state, &req, None) {
             RoutePlan::QueueByNode(worker) => assert!(worker == "a" || worker == "b"),
             _ => panic!("expected single-node route"),
         }
@@ -455,11 +516,45 @@ mod tests {
         workers.insert("worker-b".to_string(), worker_status("worker-b", vec!["llama3"]));
         state.workers = RwLock::new(workers);
         let req = request("DELETE", "/api/delete", br#"{"model":"llama3"}"#);
-        match plan_request(&state, &req) {
+        match plan_request(&state, &req, None) {
             RoutePlan::QueueByNode(worker) => {
                 assert!(worker == "worker-a" || worker == "worker-b")
             }
             _ => panic!("expected single-owner route"),
+        }
+        cleanup(&db);
+        Ok(())
+    }
+
+    #[test]
+    fn tags_masks_models_for_restricted_key() -> io::Result<()> {
+        let (mut state, db) = test_state("masked_tags")?;
+        let token = "token".to_string();
+        let key = state.keys.insert(
+            token,
+            crate::auth::Role::Client,
+            "alice".to_string(),
+            vec!["llama3".to_string()],
+            Vec::new(),
+        )?;
+        let mut workers = HashMap::new();
+        workers.insert(
+            "worker-a".to_string(),
+            WorkerStatus {
+                model_catalog: Some(json!({"models":[{"name":"llama3"},{"name":"mistral"}]})),
+                ..worker_status("worker-a", vec!["llama3", "mistral"])
+            },
+        );
+        state.workers = RwLock::new(workers);
+        let req = request("GET", "/api/tags", b"");
+        match plan_request(&state, &req, Some(&key)) {
+            RoutePlan::Local(response) => {
+                let value: Value = serde_json::from_slice(&response.body).expect("json");
+                let models = value["models"].as_array().expect("models");
+                assert_eq!(models.len(), 1);
+                assert_eq!(models[0]["name"], "llama3");
+            }
+            _ => panic!("expected local aggregate"),
         }
         cleanup(&db);
         Ok(())
