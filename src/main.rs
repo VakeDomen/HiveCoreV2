@@ -1,21 +1,18 @@
+mod app;
 mod auth;
-mod config;
-mod db;
-mod http;
-mod log;
-mod server;
-mod state;
+mod servers;
+mod shared;
 
 use std::io;
 use std::sync::Arc;
 use std::thread;
 
-use config::Config;
-use state::AppState;
+use app::AppState;
+use app::Config;
 
 fn main() -> io::Result<()> {
     let config = Config::load_or_create("config.ini")?;
-    log::info(format!(
+    shared::log::info(format!(
         "starting hive_core_v2 proxy_port={} worker_port={} management_port={} database_url={}",
         config.proxy_port,
         config.node_connection_port,
@@ -29,10 +26,10 @@ fn main() -> io::Result<()> {
     let management_state = Arc::clone(&state);
     let overseer_state = Arc::clone(&state);
 
-    let client_thread = thread::spawn(move || server::client::run(client_state));
-    let worker_thread = thread::spawn(move || server::worker::run(worker_state));
-    let management_thread = thread::spawn(move || server::management::run(management_state));
-    let overseer_thread = thread::spawn(move || state::run_overseer(overseer_state));
+    let client_thread = thread::spawn(move || servers::proxy::server::run(client_state));
+    let worker_thread = thread::spawn(move || servers::worker::server::run(worker_state));
+    let management_thread = thread::spawn(move || servers::management::server::run(management_state));
+    let overseer_thread = thread::spawn(move || servers::worker::overseer::run(overseer_state));
 
     join_server("client", client_thread)?;
     join_server("worker", worker_thread)?;
@@ -46,7 +43,7 @@ fn join_server(name: &str, handle: thread::JoinHandle<io::Result<()>>) -> io::Re
     match handle.join() {
         Ok(result) => result,
         Err(_) => {
-            log::error(format!("{name} thread panicked"));
+            shared::log::error(format!("{name} thread panicked"));
             Err(io::Error::other(format!("{name} thread panicked")))
         }
     }

@@ -2,34 +2,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-#[derive(Clone, Debug)]
-pub struct Config {
-    pub user_authentication: bool,
-    pub proxy_port: u16,
-    pub node_connection_port: u16,
-    pub management_connection_port: u16,
-    pub polling_node_connection_timeout: u64,
-    pub working_node_connection_timeout: u64,
-    pub proxy_timeout_ms: u64,
-    pub message_chunk_buffer_size: usize,
-    pub database_url: String,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            user_authentication: false,
-            proxy_port: 6666,
-            node_connection_port: 7777,
-            management_connection_port: 6668,
-            polling_node_connection_timeout: 10,
-            working_node_connection_timeout: 300,
-            proxy_timeout_ms: 60_000,
-            message_chunk_buffer_size: 16_384,
-            database_url: "sqlite.db".to_string(),
-        }
-    }
-}
+use crate::app::models::config::Config;
 
 impl Config {
     pub fn load_or_create(path: &str) -> io::Result<Self> {

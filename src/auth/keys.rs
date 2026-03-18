@@ -2,25 +2,9 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::RwLock;
 
-use crate::db::SqliteKeyStore;
-use crate::log;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Role {
-    Admin,
-    Client,
-    Worker,
-}
-
-#[derive(Clone, Debug)]
-pub struct KeyRecord {
-    pub id: i64,
-    pub token: String,
-    pub role: Role,
-    pub name: String,
-    pub whitelist_models: Vec<String>,
-    pub blacklist_models: Vec<String>,
-}
+use crate::auth::{KeyRecord, Role};
+use crate::shared::log;
+use crate::shared::sqlite::SqliteKeyStore;
 
 pub struct KeyStore {
     cache: RwLock<HashMap<String, KeyRecord>>,
@@ -102,31 +86,10 @@ impl KeyStore {
     }
 }
 
-impl KeyRecord {
-    pub fn allows_model(&self, model: &str) -> bool {
-        if self.blacklist_models.iter().any(|entry| entry == model) {
-            return false;
-        }
-        if self.whitelist_models.is_empty() {
-            return true;
-        }
-        self.whitelist_models.iter().any(|entry| entry == model)
-    }
-}
-
-impl Role {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Role::Admin => "Admin",
-            Role::Client => "Client",
-            Role::Worker => "Worker",
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{KeyStore, Role};
+    use super::KeyStore;
+    use crate::auth::{KeyRecord, Role};
     use std::fs;
     use std::io;
     use std::path::PathBuf;
@@ -276,7 +239,7 @@ mod tests {
 
     #[test]
     fn blacklist_overrides_whitelist() {
-        let record = super::KeyRecord {
+        let record = KeyRecord {
             id: 1,
             token: Uuid::new_v4().to_string(),
             role: Role::Client,
@@ -292,7 +255,7 @@ mod tests {
 
     #[test]
     fn empty_whitelist_allows_any_non_blacklisted_model() {
-        let record = super::KeyRecord {
+        let record = KeyRecord {
             id: 1,
             token: Uuid::new_v4().to_string(),
             role: Role::Client,

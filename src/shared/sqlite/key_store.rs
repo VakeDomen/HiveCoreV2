@@ -6,7 +6,7 @@ use rusqlite::{Connection, Error as SqlError, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::auth::{KeyRecord, Role};
-use crate::log;
+use crate::shared::log;
 
 pub struct SqliteKeyStore {
     // The service opens SQLite once during startup and reuses this connection

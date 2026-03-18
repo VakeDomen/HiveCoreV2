@@ -1,37 +1,10 @@
 use std::collections::{HashMap, VecDeque};
-use std::io;
-use std::net::TcpStream;
-use std::sync::{Arc, Mutex, RwLock};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
 
-use crate::auth::{KeyStore, Role};
-use crate::config::Config;
-use crate::http::{HttpRequest, HttpResponse, extract_json_value};
-use crate::log;
-
-pub struct AppState {
-    pub config: Config,
-    pub keys: KeyStore,
-    pub request_queue: RequestQueue,
-    pub workers: RwLock<HashMap<String, WorkerStatus>>,
-}
-
-impl AppState {
-    pub fn new(config: Config) -> io::Result<Self> {
-        Ok(Self {
-            keys: KeyStore::new(&config.database_url)?,
-            config,
-            request_queue: RequestQueue::default(),
-            workers: RwLock::new(HashMap::new()),
-        })
-    }
-}
-
-pub struct ClientTask {
-    pub request: HttpRequest,
-    pub client_stream: Option<TcpStream>,
-}
+use crate::servers::proxy::models::client_task::ClientTask;
+use crate::servers::proxy::models::queue_snapshot::QueueSnapshot;
+use crate::shared::http::extract_json_value;
+use crate::shared::log;
 
 #[derive(Default)]
 pub struct RequestQueue {
@@ -143,91 +116,6 @@ impl RequestQueue {
         QueueSnapshot {
             model_queue,
             node_queue,
-        }
-    }
-}
-
-pub struct QueueSnapshot {
-    pub model_queue: HashMap<String, usize>,
-    pub node_queue: HashMap<String, usize>,
-}
-
-#[derive(Clone)]
-pub struct WorkerStatus {
-    pub name: String,
-    pub nonce: String,
-    pub hive_version: String,
-    pub ollama_version: String,
-    pub tags: Vec<String>,
-    pub state: WorkerPhase,
-    pub last_ping: Instant,
-    pub last_poll: Instant,
-}
-
-#[derive(Clone, Copy)]
-pub enum WorkerPhase {
-    Authenticating,
-    Polling,
-    Working,
-}
-
-impl WorkerPhase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            WorkerPhase::Authenticating => "Authenticating",
-            WorkerPhase::Polling => "Polling",
-            WorkerPhase::Working => "Working",
-        }
-    }
-}
-
-pub fn authorize_admin(state: &Arc<AppState>, request: &HttpRequest) -> bool {
-    request
-        .bearer_token()
-        .and_then(|token| state.keys.verify(token, &[Role::Admin]))
-        .is_some()
-}
-
-pub fn reject_request(mut stream: TcpStream, status: u16, reason: &'static str) -> io::Result<()> {
-    HttpResponse::new(status, reason, Vec::new()).write_to(&mut stream)
-}
-
-pub fn run_overseer(state: Arc<AppState>) -> io::Result<()> {
-    loop {
-        thread::sleep(Duration::from_millis(500));
-        let now = Instant::now();
-        let polling_timeout = Duration::from_secs(state.config.polling_node_connection_timeout);
-        let working_timeout = Duration::from_secs(state.config.working_node_connection_timeout);
-
-        let stale_workers = state
-            .workers
-            .read()
-            .ok()
-            .map(|guard| {
-                guard
-                    .iter()
-                    .filter_map(|(name, worker)| {
-                        let timeout = match worker.state {
-                            WorkerPhase::Working => working_timeout,
-                            _ => polling_timeout,
-                        };
-                        (now.duration_since(worker.last_ping) > timeout
-                            && now.duration_since(worker.last_poll) > timeout)
-                            .then(|| name.clone())
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        if stale_workers.is_empty() {
-            continue;
-        }
-
-        if let Ok(mut guard) = state.workers.write() {
-            for name in stale_workers {
-                guard.remove(&name);
-                log::warn(format!("removed stale worker={name}"));
-            }
         }
     }
 }

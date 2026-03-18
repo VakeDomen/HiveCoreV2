@@ -4,10 +4,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::app::AppState;
 use crate::auth::Role;
-use crate::http::{HttpRequest, read_request_from_reader, serialize_request, write_framed_request};
-use crate::log;
-use crate::state::{AppState, WorkerPhase, WorkerStatus, reject_request};
+use crate::servers::worker::models::worker_phase::WorkerPhase;
+use crate::servers::worker::models::worker_status::WorkerStatus;
+use crate::shared::http::{HttpRequest, HttpResponse, read_request_from_reader, serialize_request, write_framed_request};
+use crate::shared::log;
 
 pub fn run(state: Arc<AppState>) -> io::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", state.config.node_connection_port))?;
@@ -344,4 +346,8 @@ fn remove_worker(state: &Arc<AppState>, worker_name: &str) {
         guard.remove(worker_name);
         log::info(format!("removed worker={worker_name}"));
     }
+}
+
+fn reject_request(mut stream: TcpStream, status: u16, reason: &'static str) -> io::Result<()> {
+    HttpResponse::new(status, reason, Vec::new()).write_to(&mut stream)
 }

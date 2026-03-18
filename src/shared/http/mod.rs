@@ -2,37 +2,10 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
-#[derive(Debug)]
-pub struct HttpRequest {
-    pub method: String,
-    pub uri: String,
-    pub protocol: String,
-    pub headers: HashMap<String, String>,
-    pub body: Vec<u8>,
-}
+pub mod models;
 
-impl HttpRequest {
-    pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .get(&name.to_ascii_lowercase())
-            .map(String::as_str)
-    }
-
-    pub fn bearer_token(&self) -> Option<&str> {
-        let header = self.header("authorization")?;
-        header
-            .strip_prefix("Bearer ")
-            .or_else(|| header.strip_prefix("bearer "))
-    }
-}
-
-#[derive(Debug)]
-pub struct HttpResponse {
-    pub status_code: u16,
-    pub reason: &'static str,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-}
+pub use models::http_request::HttpRequest;
+pub use models::http_response::HttpResponse;
 
 impl HttpResponse {
     pub fn new(status_code: u16, reason: &'static str, body: Vec<u8>) -> Self {

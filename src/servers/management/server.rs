@@ -3,12 +3,12 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 
-use crate::auth::Role;
-use crate::http::{
+use crate::app::{authorize_admin, AppState};
+use crate::auth::{KeyRecord, Role};
+use crate::shared::http::{
     HttpResponse, escape_json, extract_json_array_strings, extract_json_value, read_request,
 };
-use crate::log;
-use crate::state::{AppState, authorize_admin};
+use crate::shared::log;
 use uuid::Uuid;
 
 pub fn run(state: Arc<AppState>) -> io::Result<()> {
@@ -141,7 +141,7 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
                     .write_to(&mut stream);
             };
 
-            let synthetic = crate::http::HttpRequest {
+            let synthetic = crate::shared::http::HttpRequest {
                 method: match command.as_str() {
                     "UPDATE" => "UPDATE_OLLAMA".to_string(),
                     _ => command,
@@ -152,7 +152,7 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
                 body: Vec::new(),
             };
 
-            let task = crate::state::ClientTask {
+            let task = crate::servers::proxy::models::client_task::ClientTask {
                 request: synthetic,
                 client_stream: None,
             };
@@ -293,7 +293,7 @@ fn render_string_list(values: &[String]) -> String {
 }
 
 fn render_key_create_response(
-    result: io::Result<crate::auth::KeyRecord>,
+    result: io::Result<KeyRecord>,
     name: &str,
     token: &str,
     role_label: &str,

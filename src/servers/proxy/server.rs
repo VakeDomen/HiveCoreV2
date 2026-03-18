@@ -3,10 +3,11 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 
-use crate::auth::Role;
-use crate::http::{HttpResponse, extract_json_value, read_request};
-use crate::log;
-use crate::state::{AppState, ClientTask};
+use crate::app::AppState;
+use crate::servers::proxy::admission::authorize_request;
+use crate::servers::proxy::models::client_task::ClientTask;
+use crate::shared::http::{HttpResponse, read_request};
+use crate::shared::log;
 
 pub fn run(state: Arc<AppState>) -> io::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", state.config.proxy_port))?;
@@ -68,34 +69,6 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
     Ok(())
 }
 
-fn authorize_request(state: &AppState, request: &crate::http::HttpRequest) -> Result<(), u16> {
-    let verified_key = request
-        .bearer_token()
-        .and_then(|token| state.keys.verify(token, &[Role::Admin, Role::Client]));
-
-    if state.config.user_authentication && verified_key.is_none() {
-        log::warn(format!(
-            "rejected unauthorized client request method={} uri={}",
-            request.method, request.uri
-        ));
-        return Err(401);
-    }
-
-    if let Some(model) = extract_json_value(&request.body, "model") {
-        if let Some(key) = verified_key.as_ref() {
-            if !key.allows_model(&model) {
-                log::warn(format!(
-                    "rejected model by key policy key={} model={}",
-                    key.name, model
-                ));
-                return Err(403);
-            }
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -106,11 +79,10 @@ mod tests {
     use uuid::Uuid;
 
     use crate::auth::Role;
-    use crate::config::Config;
-    use crate::http::HttpRequest;
-    use crate::state::AppState;
+    use crate::app::{AppState, Config};
+    use crate::shared::http::HttpRequest;
 
-    use super::authorize_request;
+    use crate::servers::proxy::admission::authorize_request;
 
     fn temp_db_path(test_name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
