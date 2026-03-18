@@ -1,5 +1,4 @@
 use std::io;
-use std::path::Path;
 use std::sync::Mutex;
 
 use rusqlite::{Connection, Error as SqlError, OptionalExtension, params};
@@ -16,21 +15,10 @@ pub struct SqliteKeyStore {
 
 impl SqliteKeyStore {
     pub fn open(database_url: &str) -> io::Result<Self> {
-        let database_exists = Path::new(database_url).exists();
         let connection = Connection::open(database_url).map_err(to_io_error)?;
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS keys (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                value TEXT NOT NULL UNIQUE,
-                role TEXT NOT NULL,
-                whitelist_models TEXT NOT NULL DEFAULT '',
-                blacklist_models TEXT NOT NULL DEFAULT ''
-            );",
-        )
-        .map_err(to_io_error)?;
+        initialize_schema(&connection).map_err(to_io_error)?;
 
-        if !database_exists {
+        if count_keys(&connection).map_err(to_io_error)? == 0 {
             seed_bootstrap_admin(&connection).map_err(to_io_error)?;
         }
 
@@ -47,26 +35,27 @@ impl SqliteKeyStore {
         whitelist_models: Vec<String>,
         blacklist_models: Vec<String>,
     ) -> io::Result<KeyRecord> {
-        let connection = self
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| io::Error::other("key database mutex poisoned"))?;
-        connection
+        let transaction = connection.transaction().map_err(to_io_error)?;
+        transaction
             .execute(
-                "INSERT INTO keys (name, value, role, whitelist_models, blacklist_models)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    name,
-                    token,
-                    role.as_str(),
-                    encode_models(&whitelist_models),
-                    encode_models(&blacklist_models)
-                ],
+                "INSERT INTO keys (name, value, role)
+                 VALUES (?1, ?2, ?3)",
+                params![name, token, role.as_str()],
             )
             .map_err(to_io_error)?;
+        let key_id = transaction.last_insert_rowid();
+        insert_model_rules(&transaction, key_id, ModelListType::Whitelist, &whitelist_models)
+            .map_err(to_io_error)?;
+        insert_model_rules(&transaction, key_id, ModelListType::Blacklist, &blacklist_models)
+            .map_err(to_io_error)?;
+        transaction.commit().map_err(to_io_error)?;
 
         Ok(KeyRecord {
-            id: connection.last_insert_rowid(),
+            id: key_id,
             token,
             role,
             name,
@@ -82,7 +71,7 @@ impl SqliteKeyStore {
             .map_err(|_| io::Error::other("key database mutex poisoned"))?;
         let mut statement = connection
             .prepare(
-                "SELECT id, name, value, role, whitelist_models, blacklist_models
+                "SELECT id, name, value, role
                  FROM keys
                  ORDER BY id ASC",
             )
@@ -94,15 +83,22 @@ impl SqliteKeyStore {
                     name: row.get(1)?,
                     token: row.get(2)?,
                     role: parse_role(&row.get::<_, String>(3)?).ok_or(SqlError::InvalidQuery)?,
-                    whitelist_models: decode_models(&row.get::<_, String>(4)?),
-                    blacklist_models: decode_models(&row.get::<_, String>(5)?),
+                    whitelist_models: Vec::new(),
+                    blacklist_models: Vec::new(),
                 })
             })
             .map_err(to_io_error)?;
 
         let mut records = Vec::new();
         for row in rows {
-            records.push(row.map_err(to_io_error)?);
+            let mut record = row.map_err(to_io_error)?;
+            record.whitelist_models =
+                list_model_rules(&connection, record.id, ModelListType::Whitelist)
+                    .map_err(to_io_error)?;
+            record.blacklist_models =
+                list_model_rules(&connection, record.id, ModelListType::Blacklist)
+                    .map_err(to_io_error)?;
+            records.push(record);
         }
         Ok(records)
     }
@@ -114,12 +110,12 @@ impl SqliteKeyStore {
             .map_err(|_| io::Error::other("key database mutex poisoned"))?;
         let mut statement = connection
             .prepare(
-                "SELECT id, name, value, role, whitelist_models, blacklist_models
+                "SELECT id, name, value, role
                  FROM keys
                  WHERE value = ?1",
             )
             .map_err(to_io_error)?;
-        statement
+        let record = statement
             .query_row(params![token], |row| {
                 let role: String = row.get(3)?;
                 Ok(KeyRecord {
@@ -127,20 +123,56 @@ impl SqliteKeyStore {
                     name: row.get(1)?,
                     token: row.get(2)?,
                     role: parse_role(&role).ok_or(SqlError::InvalidQuery)?,
-                    whitelist_models: decode_models(&row.get::<_, String>(4)?),
-                    blacklist_models: decode_models(&row.get::<_, String>(5)?),
+                    whitelist_models: Vec::new(),
+                    blacklist_models: Vec::new(),
                 })
             })
             .optional()
-            .map_err(to_io_error)
+            .map_err(to_io_error)?;
+
+        let Some(mut record) = record else {
+            return Ok(None);
+        };
+
+        record.whitelist_models = list_model_rules(&connection, record.id, ModelListType::Whitelist)
+            .map_err(to_io_error)?;
+        record.blacklist_models = list_model_rules(&connection, record.id, ModelListType::Blacklist)
+            .map_err(to_io_error)?;
+        Ok(Some(record))
     }
+}
+
+fn initialize_schema(connection: &Connection) -> Result<(), SqlError> {
+    connection.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE IF NOT EXISTS keys (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             name TEXT NOT NULL UNIQUE,
+             value TEXT NOT NULL UNIQUE,
+             role TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS key_model_rules (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             key_id INTEGER NOT NULL,
+             list_type TEXT NOT NULL,
+             model TEXT NOT NULL,
+             UNIQUE(key_id, list_type, model),
+             FOREIGN KEY(key_id) REFERENCES keys(id) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_key_model_rules_lookup
+             ON key_model_rules (key_id, list_type, model);",
+    )
+}
+
+fn count_keys(connection: &Connection) -> Result<i64, SqlError> {
+    connection.query_row("SELECT COUNT(*) FROM keys", [], |row| row.get(0))
 }
 
 fn seed_bootstrap_admin(connection: &Connection) -> Result<(), SqlError> {
     let token = Uuid::new_v4().to_string();
     connection.execute(
-        "INSERT OR IGNORE INTO keys (name, value, role, whitelist_models, blacklist_models)
-         VALUES (?1, ?2, ?3, '', '')",
+        "INSERT OR IGNORE INTO keys (name, value, role)
+         VALUES (?1, ?2, ?3)",
         params!["admin", token, Role::Admin.as_str()],
     )?;
     log::warn("created initial admin key in sqlite database");
@@ -157,17 +189,71 @@ fn parse_role(value: &str) -> Option<Role> {
     }
 }
 
-fn encode_models(values: &[String]) -> String {
-    values.join("\n")
+#[derive(Copy, Clone)]
+enum ModelListType {
+    Whitelist,
+    Blacklist,
 }
 
-fn decode_models(value: &str) -> Vec<String> {
-    value
-        .split('\n')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(str::to_string)
-        .collect()
+impl ModelListType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Whitelist => "whitelist",
+            Self::Blacklist => "blacklist",
+        }
+    }
+}
+
+fn insert_model_rules(
+    connection: &Connection,
+    key_id: i64,
+    list_type: ModelListType,
+    models: &[String],
+) -> Result<(), SqlError> {
+    let mut statement = connection.prepare(
+        "INSERT OR IGNORE INTO key_model_rules (key_id, list_type, model)
+         VALUES (?1, ?2, ?3)",
+    )?;
+
+    for model in normalize_models(models) {
+        statement.execute(params![key_id, list_type.as_str(), model])?;
+    }
+
+    Ok(())
+}
+
+fn list_model_rules(
+    connection: &Connection,
+    key_id: i64,
+    list_type: ModelListType,
+) -> Result<Vec<String>, SqlError> {
+    let mut statement = connection.prepare(
+        "SELECT model
+         FROM key_model_rules
+         WHERE key_id = ?1 AND list_type = ?2
+         ORDER BY id ASC",
+    )?;
+    let rows = statement.query_map(params![key_id, list_type.as_str()], |row| row.get(0))?;
+    let mut models = Vec::new();
+    for row in rows {
+        models.push(row?);
+    }
+    Ok(models)
+}
+
+fn normalize_models(values: &[String]) -> Vec<String> {
+    let mut models = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if models.iter().any(|existing| existing == trimmed) {
+            continue;
+        }
+        models.push(trimmed.to_string());
+    }
+    models
 }
 
 fn to_io_error(error: SqlError) -> io::Error {

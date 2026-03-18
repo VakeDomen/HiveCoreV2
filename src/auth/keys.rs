@@ -90,6 +90,7 @@ impl KeyStore {
 mod tests {
     use super::KeyStore;
     use crate::auth::{KeyRecord, Role};
+    use rusqlite::{Connection, params};
     use std::fs;
     use std::io;
     use std::path::PathBuf;
@@ -101,6 +102,21 @@ mod tests {
 
     fn cleanup(path: &PathBuf) {
         let _ = fs::remove_file(path);
+    }
+
+    fn create_legacy_database(path: &PathBuf) -> io::Result<()> {
+        let connection = Connection::open(path).map_err(io::Error::other)?;
+        connection
+            .execute_batch(
+                "CREATE TABLE keys (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    value TEXT NOT NULL UNIQUE,
+                    role TEXT NOT NULL
+                );",
+            )
+            .map_err(io::Error::other)?;
+        Ok(())
     }
 
     #[test]
@@ -131,6 +147,77 @@ mod tests {
         assert_eq!(initial.len(), 1);
         assert_eq!(reopened_keys.len(), 1);
         assert_eq!(initial[0].token, reopened_keys[0].token);
+
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_database_opens_without_rewriting_existing_keys() -> io::Result<()> {
+        let path = temp_db_path("legacy_upgrade");
+        create_legacy_database(&path)?;
+        let token = Uuid::new_v4().to_string();
+
+        {
+            let connection = Connection::open(&path).map_err(io::Error::other)?;
+            connection
+                .execute(
+                    "INSERT INTO keys (name, value, role) VALUES (?1, ?2, ?3)",
+                    params!["legacy-worker", token, Role::Worker.as_str()],
+                )
+                .map_err(io::Error::other)?;
+        }
+
+        let store = KeyStore::new(path.to_str().expect("utf8 path"))?;
+        let keys = store.list()?;
+
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].name, "legacy-worker");
+        assert_eq!(keys[0].token, token);
+        assert_eq!(keys[0].role, Role::Worker);
+        assert!(keys[0].whitelist_models.is_empty());
+        assert!(keys[0].blacklist_models.is_empty());
+
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_database_gets_model_rule_table_without_reseeding() -> io::Result<()> {
+        let path = temp_db_path("legacy_rules");
+        create_legacy_database(&path)?;
+
+        {
+            let connection = Connection::open(&path).map_err(io::Error::other)?;
+            connection
+                .execute(
+                    "INSERT INTO keys (name, value, role) VALUES (?1, ?2, ?3)",
+                    params!["legacy-admin", Uuid::new_v4().to_string(), Role::Admin.as_str()],
+                )
+                .map_err(io::Error::other)?;
+        }
+
+        let store = KeyStore::new(path.to_str().expect("utf8 path"))?;
+        let inserted = store.insert(
+            Uuid::new_v4().to_string(),
+            Role::Client,
+            "alice".to_string(),
+            vec!["qwen3:0.6b".to_string()],
+            vec!["hidden-model".to_string()],
+        )?;
+
+        assert_eq!(inserted.whitelist_models, vec!["qwen3:0.6b"]);
+        assert_eq!(inserted.blacklist_models, vec!["hidden-model"]);
+
+        let keys = store.list()?;
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().any(|key| key.name == "legacy-admin"));
+        let alice = keys
+            .iter()
+            .find(|key| key.name == "alice")
+            .expect("inserted key should be listed");
+        assert_eq!(alice.whitelist_models, vec!["qwen3:0.6b"]);
+        assert_eq!(alice.blacklist_models, vec!["hidden-model"]);
 
         cleanup(&path);
         Ok(())
