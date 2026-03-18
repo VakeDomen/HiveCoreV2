@@ -138,29 +138,3 @@ pub fn extract_json_value(body: &[u8], field: &str) -> Option<String> {
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
 }
-
-pub fn extract_json_array_strings(body: &[u8], field: &str) -> Option<Vec<String>> {
-    let body = String::from_utf8_lossy(body);
-    let needle = format!("\"{field}\"");
-    let start = body.find(&needle)?;
-    let remainder = &body[start + needle.len()..];
-    let colon = remainder.find(':')?;
-    let value_part = remainder[colon + 1..].trim_start();
-    if !value_part.starts_with('[') {
-        return None;
-    }
-    let end = value_part.find(']')?;
-    let inner = &value_part[1..end];
-    let values = inner
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| entry.trim_matches('"').to_string())
-        .filter(|entry| !entry.is_empty())
-        .collect::<Vec<_>>();
-    Some(values)
-}
-
-pub fn escape_json(input: &str) -> String {
-    input.replace('\\', "\\\\").replace('"', "\\\"")
-}

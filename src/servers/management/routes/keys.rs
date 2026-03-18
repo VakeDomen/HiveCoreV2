@@ -1,17 +1,18 @@
 use std::io;
 
+use serde::Serialize;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::auth::{KeyRecord, Role};
-use crate::shared::http::{
-    HttpRequest, HttpResponse, escape_json, extract_json_array_strings, extract_json_value,
-};
+use crate::servers::management::models::key_request::KeyRequest;
+use crate::shared::http::{HttpRequest, HttpResponse};
 use crate::shared::log;
 
 pub fn get_keys(state: &AppState) -> HttpResponse {
     match render_keys(state) {
-        Ok(body) => HttpResponse::json(200, "OK", body),
+        Ok(body) => json_response(200, "OK", body),
         Err(err) => {
             log::error(format!("failed to render keys: {err}"));
             HttpResponse::new(500, "Internal Server Error", Vec::new())
@@ -20,82 +21,63 @@ pub fn get_keys(state: &AppState) -> HttpResponse {
 }
 
 pub fn post_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
-    let role = extract_json_value(&request.body, "role");
-    let name = extract_json_value(&request.body, "name").unwrap_or_else(|| "generated".to_string());
-    let whitelist_models =
-        extract_json_array_strings(&request.body, "whitelist_models").unwrap_or_default();
-    let blacklist_models =
-        extract_json_array_strings(&request.body, "blacklist_models").unwrap_or_default();
+    let payload = match serde_json::from_slice::<KeyRequest>(&request.body) {
+        Ok(payload) => payload,
+        Err(err) => {
+            log::warn(format!("invalid key request json: {err}"));
+            return HttpResponse::new(400, "Bad Request", b"Invalid JSON body".to_vec());
+        }
+    };
     let generated_token = Uuid::new_v4().to_string();
 
-    match role.as_deref() {
-        Some("Admin") => render_key_create_response(
+    match payload.role {
+        Role::Admin => render_key_create_response(
             state.keys.insert(
                 generated_token.clone(),
                 Role::Admin,
-                name.clone(),
-                whitelist_models.clone(),
-                blacklist_models.clone(),
+                payload.name.clone(),
+                payload.whitelist_models.clone(),
+                payload.blacklist_models.clone(),
             ),
-            &name,
+            &payload.name,
             &generated_token,
             "admin",
         ),
-        Some("Client") => render_key_create_response(
+        Role::Client => render_key_create_response(
             state.keys.insert(
                 generated_token.clone(),
                 Role::Client,
-                name.clone(),
-                whitelist_models.clone(),
-                blacklist_models.clone(),
+                payload.name.clone(),
+                payload.whitelist_models.clone(),
+                payload.blacklist_models.clone(),
             ),
-            &name,
+            &payload.name,
             &generated_token,
             "client",
         ),
-        Some("Worker") => render_key_create_response(
+        Role::Worker => render_key_create_response(
             state.keys.insert(
                 generated_token.clone(),
                 Role::Worker,
-                name.clone(),
-                whitelist_models.clone(),
-                blacklist_models.clone(),
+                payload.name.clone(),
+                payload.whitelist_models.clone(),
+                payload.blacklist_models.clone(),
             ),
-            &name,
+            &payload.name,
             &generated_token,
             "worker",
         ),
-        _ => HttpResponse::new(400, "Bad Request", b"Expected role".to_vec()),
     }
 }
 
-fn render_keys(state: &AppState) -> io::Result<String> {
+fn render_keys(state: &AppState) -> io::Result<Value> {
     let entries = state
         .keys
         .list()?
         .into_iter()
-        .map(|key| {
-            format!(
-                "{{\"id\":{},\"token\":\"{}\",\"value\":\"{}\",\"role\":\"{}\",\"name\":\"{}\",\"whitelist_models\":{},\"blacklist_models\":{}}}",
-                key.id,
-                escape_json(&key.token),
-                escape_json(&key.token),
-                key.role.as_str(),
-                escape_json(&key.name),
-                render_string_list(&key.whitelist_models),
-                render_string_list(&key.blacklist_models)
-            )
-        })
+        .map(KeyResponse::from)
         .collect::<Vec<_>>();
-    Ok(format!("[{}]", entries.join(",")))
-}
-
-fn render_string_list(values: &[String]) -> String {
-    let entries = values
-        .iter()
-        .map(|value| format!("\"{}\"", escape_json(value)))
-        .collect::<Vec<_>>();
-    format!("[{}]", entries.join(","))
+    Ok(json!(entries))
 }
 
 fn render_key_create_response(
@@ -110,11 +92,7 @@ fn render_key_create_response(
                 "generated {role_label} key name={} token={token}",
                 name
             ));
-            HttpResponse::json(
-                201,
-                "Created",
-                format!("{{\"token\":\"{}\"}}", escape_json(token)),
-            )
+            json_response(201, "Created", json!({ "token": token }))
         }
         Err(err) => {
             log::warn(format!(
@@ -127,6 +105,38 @@ fn render_key_create_response(
                 (500, "Internal Server Error")
             };
             HttpResponse::new(status.0, status.1, Vec::new())
+        }
+    }
+}
+
+fn json_response(status: u16, reason: &'static str, value: Value) -> HttpResponse {
+    match serde_json::to_string(&value) {
+        Ok(body) => HttpResponse::json(status, reason, body),
+        Err(_) => HttpResponse::new(500, "Internal Server Error", Vec::new()),
+    }
+}
+
+#[derive(Serialize)]
+struct KeyResponse {
+    id: i64,
+    token: String,
+    value: String,
+    role: Role,
+    name: String,
+    whitelist_models: Vec<String>,
+    blacklist_models: Vec<String>,
+}
+
+impl From<KeyRecord> for KeyResponse {
+    fn from(value: KeyRecord) -> Self {
+        Self {
+            id: value.id,
+            token: value.token.clone(),
+            value: value.token,
+            role: value.role,
+            name: value.name,
+            whitelist_models: value.whitelist_models,
+            blacklist_models: value.blacklist_models,
         }
     }
 }

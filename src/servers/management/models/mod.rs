@@ -1,1 +1,2 @@
-// Reserved for management route DTOs when the management API grows.
+pub mod key_request;
+pub mod worker_command;

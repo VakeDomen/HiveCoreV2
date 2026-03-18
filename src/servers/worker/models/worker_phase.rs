@@ -1,16 +1,8 @@
-#[derive(Clone, Copy)]
+use serde::Serialize;
+
+#[derive(Clone, Copy, Serialize)]
 pub enum WorkerPhase {
     Authenticating,
     Polling,
     Working,
-}
-
-impl WorkerPhase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            WorkerPhase::Authenticating => "Authenticating",
-            WorkerPhase::Polling => "Polling",
-            WorkerPhase::Working => "Working",
-        }
-    }
 }

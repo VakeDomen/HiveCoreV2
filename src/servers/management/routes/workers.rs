@@ -1,27 +1,44 @@
+use serde_json::{Value, json};
+
 use crate::app::AppState;
-use crate::shared::http::{HttpResponse, escape_json};
+use crate::shared::http::HttpResponse;
 
 pub fn get_status(state: &AppState) -> HttpResponse {
-    HttpResponse::json(200, "OK", render_workers(state))
+    json_response(render_workers(state))
 }
 
 pub fn get_connections(state: &AppState) -> HttpResponse {
-    HttpResponse::json(200, "OK", render_workers(state))
+    json_response(render_workers(state))
 }
 
 pub fn get_pings(state: &AppState) -> HttpResponse {
-    HttpResponse::json(200, "OK", render_worker_pings(state))
+    json_response(render_worker_pings(state))
 }
 
 pub fn get_tags(state: &AppState) -> HttpResponse {
-    HttpResponse::json(200, "OK", render_worker_tags(state))
+    json_response(render_worker_tags(state))
 }
 
 pub fn get_versions(state: &AppState) -> HttpResponse {
-    HttpResponse::json(200, "OK", render_worker_versions(state))
+    json_response(render_worker_versions(state))
 }
 
-fn render_workers(state: &AppState) -> String {
+fn render_workers(state: &AppState) -> Value {
+    let entries = state
+        .workers
+        .read()
+        .ok()
+        .map(|guard| {
+            guard
+                .values()
+                .map(|worker| (worker.name.clone(), json!([worker.state])))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!(entries.into_iter().collect::<std::collections::HashMap<_, _>>())
+}
+
+fn render_worker_pings(state: &AppState) -> Value {
     let entries = state
         .workers
         .read()
@@ -30,19 +47,36 @@ fn render_workers(state: &AppState) -> String {
             guard
                 .values()
                 .map(|worker| {
-                    format!(
-                        "\"{}\":[\"{}\"]",
-                        escape_json(&worker.name),
-                        worker.state.as_str()
+                    (
+                        worker.name.clone(),
+                        json!({
+                            "last_ping_ms": worker.last_ping.elapsed().as_millis(),
+                            "last_poll_ms": worker.last_poll.elapsed().as_millis()
+                        }),
                     )
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    format!("{{{}}}", entries.join(","))
+    json!(entries.into_iter().collect::<std::collections::HashMap<_, _>>())
 }
 
-fn render_worker_pings(state: &AppState) -> String {
+fn render_worker_tags(state: &AppState) -> Value {
+    let entries = state
+        .workers
+        .read()
+        .ok()
+        .map(|guard| {
+            guard
+                .values()
+                .map(|worker| (worker.name.clone(), json!(worker.tags)))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!(entries.into_iter().collect::<std::collections::HashMap<_, _>>())
+}
+
+fn render_worker_versions(state: &AppState) -> Value {
     let entries = state
         .workers
         .read()
@@ -51,60 +85,23 @@ fn render_worker_pings(state: &AppState) -> String {
             guard
                 .values()
                 .map(|worker| {
-                    format!(
-                        "\"{}\":{{\"last_ping_ms\":{},\"last_poll_ms\":{}}}",
-                        escape_json(&worker.name),
-                        worker.last_ping.elapsed().as_millis(),
-                        worker.last_poll.elapsed().as_millis()
+                    (
+                        worker.name.clone(),
+                        json!({
+                            "hive_version": worker.hive_version,
+                            "ollama_version": worker.ollama_version
+                        }),
                     )
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    format!("{{{}}}", entries.join(","))
+    json!(entries.into_iter().collect::<std::collections::HashMap<_, _>>())
 }
 
-fn render_worker_tags(state: &AppState) -> String {
-    let entries = state
-        .workers
-        .read()
-        .ok()
-        .map(|guard| {
-            guard
-                .values()
-                .map(|worker| {
-                    let tags = worker
-                        .tags
-                        .iter()
-                        .map(|tag| format!("\"{}\"", escape_json(tag)))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    format!("\"{}\":[{}]", escape_json(&worker.name), tags)
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    format!("{{{}}}", entries.join(","))
-}
-
-fn render_worker_versions(state: &AppState) -> String {
-    let entries = state
-        .workers
-        .read()
-        .ok()
-        .map(|guard| {
-            guard
-                .values()
-                .map(|worker| {
-                    format!(
-                        "\"{}\":{{\"hive_version\":\"{}\",\"ollama_version\":\"{}\"}}",
-                        escape_json(&worker.name),
-                        escape_json(&worker.hive_version),
-                        escape_json(&worker.ollama_version)
-                    )
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    format!("{{{}}}", entries.join(","))
+fn json_response(value: Value) -> HttpResponse {
+    match serde_json::to_string(&value) {
+        Ok(body) => HttpResponse::json(200, "OK", body),
+        Err(_) => HttpResponse::new(500, "Internal Server Error", Vec::new()),
+    }
 }

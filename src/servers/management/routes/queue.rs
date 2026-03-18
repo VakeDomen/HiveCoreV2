@@ -1,18 +1,15 @@
+use serde_json::json;
+
 use crate::app::AppState;
-use crate::shared::http::{HttpResponse, escape_json};
+use crate::shared::http::HttpResponse;
 
 pub fn get_queue(state: &AppState) -> HttpResponse {
     let snapshot = state.request_queue.snapshot();
-    let model_queue = render_count_map(&snapshot.model_queue);
-    let node_queue = render_count_map(&snapshot.node_queue);
-    let body = format!("{{\"model_queue\":{model_queue},\"node_queue\":{node_queue}}}");
-    HttpResponse::json(200, "OK", body)
-}
-
-fn render_count_map(map: &std::collections::HashMap<String, usize>) -> String {
-    let entries: Vec<String> = map
-        .iter()
-        .map(|(key, value)| format!("\"{}\":{}", escape_json(key), value))
-        .collect();
-    format!("{{{}}}", entries.join(","))
+    match serde_json::to_string(&json!({
+        "model_queue": snapshot.model_queue,
+        "node_queue": snapshot.node_queue
+    })) {
+        Ok(body) => HttpResponse::json(200, "OK", body),
+        Err(_) => HttpResponse::new(500, "Internal Server Error", Vec::new()),
+    }
 }
