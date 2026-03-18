@@ -37,28 +37,12 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         }
     };
 
-    let verified_key = request
-        .bearer_token()
-        .and_then(|token| state.keys.verify(token, &[Role::Admin, Role::Client]));
-
-    if state.config.user_authentication && verified_key.is_none() {
-        log::warn(format!(
-            "rejected unauthorized client request method={} uri={}",
-            request.method, request.uri
-        ));
-        return HttpResponse::new(403, "Unauthorized", Vec::new()).write_to(&mut stream);
-    }
-
-    if let Some(model) = extract_json_value(&request.body, "model") {
-        if let Some(key) = verified_key.as_ref() {
-            if !key.allows_model(&model) {
-                log::warn(format!(
-                    "rejected model by key policy key={} model={}",
-                    key.name, model
-                ));
-                return HttpResponse::new(403, "Forbidden", Vec::new()).write_to(&mut stream);
-            }
-        }
+    if let Err(status) = authorize_request(&state, &request) {
+        let reason = match status {
+            403 => "Forbidden",
+            _ => "Unauthorized",
+        };
+        return HttpResponse::new(status, reason, Vec::new()).write_to(&mut stream);
     }
 
     let request_method = request.method.clone();
@@ -82,4 +66,152 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         request_method, request_uri
     ));
     Ok(())
+}
+
+fn authorize_request(state: &AppState, request: &crate::http::HttpRequest) -> Result<(), u16> {
+    let verified_key = request
+        .bearer_token()
+        .and_then(|token| state.keys.verify(token, &[Role::Admin, Role::Client]));
+
+    if state.config.user_authentication && verified_key.is_none() {
+        log::warn(format!(
+            "rejected unauthorized client request method={} uri={}",
+            request.method, request.uri
+        ));
+        return Err(401);
+    }
+
+    if let Some(model) = extract_json_value(&request.body, "model") {
+        if let Some(key) = verified_key.as_ref() {
+            if !key.allows_model(&model) {
+                log::warn(format!(
+                    "rejected model by key policy key={} model={}",
+                    key.name, model
+                ));
+                return Err(403);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::fs;
+    use std::io;
+    use std::path::PathBuf;
+
+    use uuid::Uuid;
+
+    use crate::auth::Role;
+    use crate::config::Config;
+    use crate::http::HttpRequest;
+    use crate::state::AppState;
+
+    use super::authorize_request;
+
+    fn temp_db_path(test_name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "hive_core_v2_client_{test_name}_{}.db",
+            Uuid::new_v4()
+        ))
+    }
+
+    fn test_state(test_name: &str, user_authentication: bool) -> io::Result<(AppState, PathBuf)> {
+        let db_path = temp_db_path(test_name);
+        let config = Config {
+            user_authentication,
+            database_url: db_path.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        Ok((AppState::new(config)?, db_path))
+    }
+
+    fn request_with_auth(token: Option<&str>, body: &[u8]) -> HttpRequest {
+        let mut headers = HashMap::new();
+        if let Some(token) = token {
+            headers.insert("authorization".to_string(), format!("Bearer {token}"));
+        }
+        HttpRequest {
+            method: "POST".to_string(),
+            uri: "/api/generate".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers,
+            body: body.to_vec(),
+        }
+    }
+
+    fn cleanup(path: &PathBuf) {
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_missing_client_credentials_when_auth_is_enabled() -> io::Result<()> {
+        let (state, db_path) = test_state("missing_auth", true)?;
+        let request = request_with_auth(None, br#"{"model":"llama3"}"#);
+
+        assert_eq!(authorize_request(&state, &request), Err(401));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_request_when_whitelist_allows_model() -> io::Result<()> {
+        let (state, db_path) = test_state("whitelist_ok", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            vec!["llama3".to_string()],
+            Vec::new(),
+        )?;
+        let request = request_with_auth(Some(&token), br#"{"model":"llama3"}"#);
+
+        assert_eq!(authorize_request(&state, &request), Ok(()));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_request_when_model_not_in_whitelist() -> io::Result<()> {
+        let (state, db_path) = test_state("whitelist_reject", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            vec!["llama3".to_string()],
+            Vec::new(),
+        )?;
+        let request = request_with_auth(Some(&token), br#"{"model":"mistral"}"#);
+
+        assert_eq!(authorize_request(&state, &request), Err(403));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_request_when_model_is_blacklisted() -> io::Result<()> {
+        let (state, db_path) = test_state("blacklist_reject", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            vec!["llama3".to_string(), "mistral".to_string()],
+            vec!["mistral".to_string()],
+        )?;
+        let request = request_with_auth(Some(&token), br#"{"model":"mistral"}"#);
+
+        assert_eq!(authorize_request(&state, &request), Err(403));
+
+        cleanup(&db_path);
+        Ok(())
+    }
 }

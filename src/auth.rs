@@ -230,6 +230,51 @@ mod tests {
     }
 
     #[test]
+    fn verify_requires_an_allowed_role() -> io::Result<()> {
+        let path = temp_db_path("verify_role");
+        let store = KeyStore::new(path.to_str().expect("utf8 path"))?;
+        let token = Uuid::new_v4().to_string();
+        store.insert(
+            token.clone(),
+            Role::Worker,
+            "worker-a".to_string(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        assert!(store.verify(&token, &[Role::Worker]).is_some());
+        assert!(store.verify(&token, &[Role::Admin, Role::Client]).is_none());
+
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_populates_cache_and_survives_repeated_calls() -> io::Result<()> {
+        let path = temp_db_path("verify_cache");
+        let store = KeyStore::new(path.to_str().expect("utf8 path"))?;
+        let token = Uuid::new_v4().to_string();
+        store.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            vec!["llama3".to_string()],
+            Vec::new(),
+        )?;
+
+        let first = store.verify(&token, &[Role::Client]).expect("first verify");
+        let second = store.verify(&token, &[Role::Client]).expect("second verify");
+
+        assert_eq!(first.name, "alice");
+        assert_eq!(second.name, "alice");
+        assert_eq!(first.whitelist_models, vec!["llama3"]);
+        assert_eq!(second.whitelist_models, vec!["llama3"]);
+
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
     fn blacklist_overrides_whitelist() {
         let record = super::KeyRecord {
             id: 1,
