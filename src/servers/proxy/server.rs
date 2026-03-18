@@ -6,7 +6,10 @@ use std::thread;
 use crate::app::AppState;
 use crate::servers::proxy::admission::authorize_request;
 use crate::servers::proxy::models::client_task::ClientTask;
-use crate::shared::http::{HttpResponse, read_request};
+use crate::servers::proxy::models::response_target::ResponseTarget;
+use crate::servers::proxy::models::route_plan::RoutePlan;
+use crate::servers::proxy::planner::plan_request;
+use crate::shared::http::{HttpRequest, HttpResponse, read_request};
 use crate::shared::log;
 
 pub fn run(state: Arc<AppState>) -> io::Result<()> {
@@ -48,18 +51,71 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
 
     let request_method = request.method.clone();
     let request_uri = request.uri.clone();
-    let task = ClientTask {
-        request,
-        client_stream: Some(stream.try_clone()?),
-    };
 
-    if let Err(message) = state.request_queue.enqueue(task) {
+    match plan_request(&state, &request) {
+        RoutePlan::Local(response) => response.write_to(&mut stream),
+        RoutePlan::Reject {
+            status,
+            reason,
+            message,
+        } => HttpResponse::new(status, reason, message.as_bytes().to_vec()).write_to(&mut stream),
+        RoutePlan::QueueByModel(model) => {
+            let task = client_task(request, &stream)?;
+            enqueue_model(&state, model, task, &request_method, &request_uri, &mut stream)
+        }
+        RoutePlan::QueueByNode(worker) => {
+            let task = client_task(request, &stream)?;
+            enqueue_node(&state, worker, task, &request_method, &request_uri, &mut stream)
+        }
+    }
+}
+
+fn client_task(request: HttpRequest, stream: &TcpStream) -> io::Result<ClientTask> {
+    Ok(ClientTask {
+        request,
+        response_target: ResponseTarget::ProxyClient(stream.try_clone()?),
+    })
+}
+
+fn enqueue_model(
+    state: &Arc<AppState>,
+    model: String,
+    task: ClientTask,
+    request_method: &str,
+    request_uri: &str,
+    stream: &mut TcpStream,
+) -> io::Result<()> {
+    if let Err(message) = state.request_queue.enqueue_model(model, task) {
         log::warn(format!(
             "rejecting client request method={} uri={} reason={}",
             request_method, request_uri, message
         ));
-        return HttpResponse::new(405, "Method Not Allowed", message.as_bytes().to_vec())
-            .write_to(&mut stream);
+        return HttpResponse::new(500, "Internal Server Error", message.as_bytes().to_vec())
+            .write_to(stream);
+    }
+
+    log::info(format!(
+        "accepted client request method={} uri={}",
+        request_method, request_uri
+    ));
+    Ok(())
+}
+
+fn enqueue_node(
+    state: &Arc<AppState>,
+    worker: String,
+    task: ClientTask,
+    request_method: &str,
+    request_uri: &str,
+    stream: &mut TcpStream,
+) -> io::Result<()> {
+    if let Err(message) = state.request_queue.enqueue_node(worker, task) {
+        log::warn(format!(
+            "rejecting client request method={} uri={} reason={}",
+            request_method, request_uri, message
+        ));
+        return HttpResponse::new(500, "Internal Server Error", message.as_bytes().to_vec())
+            .write_to(stream);
     }
 
     log::info(format!(
@@ -78,11 +134,10 @@ mod tests {
 
     use uuid::Uuid;
 
-    use crate::auth::Role;
     use crate::app::{AppState, Config};
-    use crate::shared::http::HttpRequest;
-
+    use crate::auth::Role;
     use crate::servers::proxy::admission::authorize_request;
+    use crate::shared::http::HttpRequest;
 
     fn temp_db_path(test_name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

@@ -1,6 +1,7 @@
 use crate::app::AppState;
 use crate::servers::management::models::worker_command::WorkerCommandRequest;
 use crate::servers::proxy::models::client_task::ClientTask;
+use crate::servers::proxy::models::response_target::ResponseTarget;
 use crate::shared::http::{HttpRequest, HttpResponse};
 use crate::shared::log;
 
@@ -23,7 +24,7 @@ pub fn post_worker_command(state: &AppState, request: &HttpRequest) -> HttpRespo
 
     let task = ClientTask {
         request: synthetic,
-        client_stream: None,
+        response_target: ResponseTarget::Ignore,
     };
     if state.request_queue.enqueue_to_node(payload.worker, task).is_ok() {
         log::info("accepted worker command");

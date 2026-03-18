@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct HttpRequest {
     pub method: String,
     pub uri: String,

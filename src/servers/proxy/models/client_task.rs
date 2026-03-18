@@ -1,8 +1,8 @@
-use std::net::TcpStream;
-
 use crate::shared::http::HttpRequest;
+
+use super::response_target::ResponseTarget;
 
 pub struct ClientTask {
     pub request: HttpRequest,
-    pub client_stream: Option<TcpStream>,
+    pub response_target: ResponseTarget,
 }

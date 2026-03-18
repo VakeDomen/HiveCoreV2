@@ -6,9 +6,13 @@ use std::time::{Duration, Instant};
 
 use crate::app::AppState;
 use crate::auth::Role;
+use crate::servers::proxy::models::response_target::ResponseTarget;
+use crate::servers::proxy::models::worker_http_response::WorkerHttpResponse;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
 use crate::servers::worker::models::worker_status::WorkerStatus;
-use crate::shared::http::{HttpRequest, HttpResponse, read_request_from_reader, serialize_request, write_framed_request};
+use crate::shared::http::{
+    HttpRequest, HttpResponse, read_request_from_reader, serialize_request, write_framed_request,
+};
 use crate::shared::log;
 
 pub fn run(state: Arc<AppState>) -> io::Result<()> {
@@ -124,6 +128,9 @@ fn authenticate_worker(
                 state: WorkerPhase::Authenticating,
                 last_ping: Instant::now(),
                 last_poll: Instant::now(),
+                model_catalog: None,
+                running_models: None,
+                version_payload: None,
             },
         );
     }
@@ -161,10 +168,6 @@ fn handle_poll(
         )
     };
     touch_worker(state, worker_name, incoming_tags, WorkerPhase::Polling);
-    // log::info(format!(
-    //     "worker poll received name={} uri={}",
-    //     worker_name, poll_request.uri
-    // ));
 
     let tags = state
         .workers
@@ -173,7 +176,7 @@ fn handle_poll(
         .and_then(|guard| guard.get(worker_name).map(|worker| worker.tags.clone()))
         .unwrap_or_default();
 
-    if let Some(mut task) = state.request_queue.dequeue_for_worker(worker_name, &tags) {
+    if let Some(task) = state.request_queue.dequeue_for_worker(worker_name, &tags) {
         touch_worker(state, worker_name, None, WorkerPhase::Working);
         let bytes = serialize_request(&task.request);
         log::info(format!(
@@ -181,11 +184,20 @@ fn handle_poll(
             worker_name, task.request.method, task.request.uri
         ));
         write_framed_request(writer, &bytes)?;
-        if let Some(client_stream) = task.client_stream.as_mut() {
-            proxy_worker_response(reader, client_stream)?;
-        } else {
-            discard_worker_response(reader)?;
+
+        match task.response_target {
+            ResponseTarget::ProxyClient(mut client_stream) => {
+                proxy_worker_response(reader, &mut client_stream)?
+            }
+            ResponseTarget::Capture(sender) => {
+                let response = capture_worker_response(reader)?;
+                let _ = sender.send(response);
+            }
+            ResponseTarget::Ignore => {
+                discard_worker_response(reader)?;
+            }
         }
+
         touch_worker(state, worker_name, None, WorkerPhase::Polling);
         return Ok(());
     }
@@ -198,7 +210,6 @@ fn handle_poll(
         body: Vec::new(),
     };
     let bytes = serialize_request(&pong);
-    // log::info(format!("worker={} idle, sent pong", worker_name));
     write_framed_request(writer, &bytes)
 }
 
@@ -272,11 +283,18 @@ fn proxy_worker_response(
 }
 
 fn discard_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<()> {
-    let mut sink = io::sink();
+    let _ = capture_worker_response(reader)?;
+    Ok(())
+}
+
+fn capture_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<WorkerHttpResponse> {
     let mut status_line = String::new();
     reader.read_line(&mut status_line)?;
     if status_line.trim().is_empty() {
-        return Ok(());
+        return Ok(WorkerHttpResponse {
+            status_code: 502,
+            body: Vec::new(),
+        });
     }
 
     let mut content_length = None;
@@ -300,6 +318,7 @@ fn discard_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<()> 
         }
     }
 
+    let mut body = Vec::new();
     if chunked {
         loop {
             let mut size_line = String::new();
@@ -310,17 +329,29 @@ fn discard_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<()> 
                 reader.read_exact(&mut trailing)?;
                 break;
             }
-            let mut chunk = vec![0_u8; size + 2];
+            let mut chunk = vec![0_u8; size];
             reader.read_exact(&mut chunk)?;
-            sink.write_all(&chunk)?;
+            body.extend_from_slice(&chunk);
+            let mut crlf = [0_u8; 2];
+            reader.read_exact(&mut crlf)?;
         }
     } else if let Some(length) = content_length {
-        let mut body = vec![0_u8; length];
-        reader.read_exact(&mut body)?;
-        sink.write_all(&body)?;
+        let mut fixed = vec![0_u8; length];
+        reader.read_exact(&mut fixed)?;
+        body = fixed;
     }
 
-    Ok(())
+    let status_code = status_line
+        .trim_end()
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(500);
+
+    Ok(WorkerHttpResponse {
+        status_code,
+        body,
+    })
 }
 
 fn touch_worker(

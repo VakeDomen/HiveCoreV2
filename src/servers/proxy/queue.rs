@@ -3,7 +3,6 @@ use std::sync::Mutex;
 
 use crate::servers::proxy::models::client_task::ClientTask;
 use crate::servers::proxy::models::queue_snapshot::QueueSnapshot;
-use crate::shared::http::extract_json_value;
 use crate::shared::log;
 
 #[derive(Default)]
@@ -13,28 +12,7 @@ pub struct RequestQueue {
 }
 
 impl RequestQueue {
-    pub fn enqueue(&self, task: ClientTask) -> Result<(), &'static str> {
-        if task.request.protocol == "HIVE" {
-            return Err("HIVE requests are not accepted on the proxy listener");
-        }
-
-        if let Some(node) = task.request.header("node").map(str::to_string) {
-            let mut guard = self.node_queue.lock().map_err(|_| "node queue poisoned")?;
-            let method = task.request.method.clone();
-            let uri = task.request.uri.clone();
-            let node_name = node.clone();
-            guard.entry(node).or_default().push_back(task);
-            log::info(format!(
-                "queued targeted request worker={} method={} uri={}",
-                node_name, method, uri
-            ));
-            return Ok(());
-        }
-
-        let Some(model) = extract_json_value(&task.request.body, "model") else {
-            return Err("request body is missing the model field");
-        };
-
+    pub fn enqueue_model(&self, model: String, task: ClientTask) -> Result<(), &'static str> {
         let mut guard = self
             .model_queue
             .lock()
@@ -46,6 +24,19 @@ impl RequestQueue {
         log::info(format!(
             "queued model request model={} method={} uri={}",
             queued_model, method, uri
+        ));
+        Ok(())
+    }
+
+    pub fn enqueue_node(&self, node: String, task: ClientTask) -> Result<(), &'static str> {
+        let mut guard = self.node_queue.lock().map_err(|_| "node queue poisoned")?;
+        let method = task.request.method.clone();
+        let uri = task.request.uri.clone();
+        let node_name = node.clone();
+        guard.entry(node).or_default().push_back(task);
+        log::info(format!(
+            "queued targeted request worker={} method={} uri={}",
+            node_name, method, uri
         ));
         Ok(())
     }
@@ -82,11 +73,7 @@ impl RequestQueue {
         worker_name: String,
         task: ClientTask,
     ) -> Result<(), &'static str> {
-        let mut guard = self.node_queue.lock().map_err(|_| "node queue poisoned")?;
-        let worker = worker_name.clone();
-        guard.entry(worker_name).or_default().push_back(task);
-        log::info(format!("queued worker command target={worker}"));
-        Ok(())
+        self.enqueue_node(worker_name, task)
     }
 
     pub fn snapshot(&self) -> QueueSnapshot {
