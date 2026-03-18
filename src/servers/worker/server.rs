@@ -47,7 +47,7 @@ fn handle_connection(state: Arc<AppState>, stream: TcpStream) -> io::Result<()> 
 
     let auth_request = read_request_from_reader(&mut reader)?;
     let worker_name = authenticate_worker(&state, &mut writer, &auth_request)?;
-    log::info(format!("worker authenticated name={worker_name}"));
+    log::success(format!("worker authenticated name={}", log::bold(&worker_name)));
 
     loop {
         let request = match read_request_from_reader(&mut reader) {
@@ -145,6 +145,13 @@ fn authenticate_worker(
     let bytes = serialize_request(&response);
     write_framed_request(writer, &bytes)?;
     touch_worker(state, &worker_name, None, WorkerPhase::Polling);
+    log::info(format!(
+        "worker auth accepted name={} role={} hive_version={} ollama_version={}",
+        log::bold(&worker_name),
+        record.role.as_str(),
+        log::bold(parts[2]),
+        log::bold(parts[3])
+    ));
     Ok(worker_name)
 }
 
@@ -178,27 +185,49 @@ fn handle_poll(
 
     if let Some(task) = state.request_queue.dequeue_for_worker(worker_name, &tags) {
         touch_worker(state, worker_name, None, WorkerPhase::Working);
+        let request_id = task.id;
+        let request_method = task.request.method.clone();
+        let request_uri = task.request.uri.clone();
+        let queue_wait = task.queue_wait();
+        let started_at = Instant::now();
         let bytes = serialize_request(&task.request);
         log::info(format!(
-            "forwarding request to worker={} method={} uri={}",
-            worker_name, task.request.method, task.request.uri
+            "forwarding request id={} to worker={} method={} uri={} queue_wait={}",
+            log::bold(request_id.to_string()),
+            log::bold(worker_name),
+            request_method,
+            request_uri,
+            log::bold(log::format_duration(queue_wait))
         ));
         write_framed_request(writer, &bytes)?;
 
-        match task.response_target {
+        let status_code = match task.response_target {
             ResponseTarget::ProxyClient(mut client_stream) => {
                 proxy_worker_response(reader, &mut client_stream)?
             }
             ResponseTarget::Capture(sender) => {
                 let response = capture_worker_response(reader)?;
+                let status_code = response.status_code;
                 let _ = sender.send(response);
+                status_code
             }
-            ResponseTarget::Ignore => {
-                discard_worker_response(reader)?;
-            }
-        }
+            ResponseTarget::Ignore => discard_worker_response(reader)?,
+        };
 
         touch_worker(state, worker_name, None, WorkerPhase::Polling);
+        let worker_time = started_at.elapsed();
+        let total_time = queue_wait + worker_time;
+        log::success(format!(
+            "resolved request id={} worker={} method={} uri={} status={} wait={} worker_time={} total={}",
+            log::bold(request_id.to_string()),
+            log::bold(worker_name),
+            request_method,
+            request_uri,
+            log::bold(status_code.to_string()),
+            log::bold(log::format_duration(queue_wait)),
+            log::bold(log::format_duration(worker_time)),
+            log::bold(log::format_duration(total_time))
+        ));
         return Ok(());
     }
 
@@ -216,7 +245,7 @@ fn handle_poll(
 fn proxy_worker_response(
     reader: &mut BufReader<TcpStream>,
     client_stream: &mut TcpStream,
-) -> io::Result<()> {
+) -> io::Result<u16> {
     let mut status_line = String::new();
     reader.read_line(&mut status_line)?;
     if status_line.trim().is_empty() {
@@ -279,12 +308,14 @@ fn proxy_worker_response(
         client_stream.write_all(&body)?;
     }
 
-    client_stream.flush()
+    client_stream.flush()?;
+
+    Ok(parse_status_code(&status_line))
 }
 
-fn discard_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<()> {
-    let _ = capture_worker_response(reader)?;
-    Ok(())
+fn discard_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<u16> {
+    let response = capture_worker_response(reader)?;
+    Ok(response.status_code)
 }
 
 fn capture_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<WorkerHttpResponse> {
@@ -341,15 +372,8 @@ fn capture_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<Work
         body = fixed;
     }
 
-    let status_code = status_line
-        .trim_end()
-        .split_whitespace()
-        .nth(1)
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(500);
-
     Ok(WorkerHttpResponse {
-        status_code,
+        status_code: parse_status_code(&status_line),
         body,
     })
 }
@@ -375,10 +399,20 @@ fn touch_worker(
 fn remove_worker(state: &Arc<AppState>, worker_name: &str) {
     if let Ok(mut guard) = state.workers.write() {
         guard.remove(worker_name);
-        log::info(format!("removed worker={worker_name}"));
+        log::info(format!("removed worker={}", log::bold(worker_name)));
     }
 }
 
-fn reject_request(mut stream: TcpStream, status: u16, reason: &'static str) -> io::Result<()> {
-    HttpResponse::new(status, reason, Vec::new()).write_to(&mut stream)
+fn reject_request(mut stream: TcpStream, status: u16, reason: &'static str) -> io::Result<u16> {
+    HttpResponse::new(status, reason, Vec::new()).write_to(&mut stream)?;
+    Ok(status)
+}
+
+fn parse_status_code(status_line: &str) -> u16 {
+    status_line
+        .trim_end()
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(500)
 }

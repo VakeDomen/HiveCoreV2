@@ -14,10 +14,10 @@ fn main() -> io::Result<()> {
     let config = Config::load_or_create("config.ini")?;
     shared::log::info(format!(
         "starting hive_core_v2 proxy_port={} worker_port={} management_port={} database_url={}",
-        config.proxy_port,
-        config.node_connection_port,
-        config.management_connection_port,
-        config.database_url
+        shared::log::bold(config.proxy_port.to_string()),
+        shared::log::bold(config.node_connection_port.to_string()),
+        shared::log::bold(config.management_connection_port.to_string()),
+        shared::log::bold(&config.database_url)
     ));
     let state = Arc::new(AppState::new(config.clone())?);
 

@@ -54,10 +54,7 @@ fn dispatch_capture(
     timeout: Duration,
 ) -> Option<WorkerHttpResponse> {
     let (tx, rx) = mpsc::channel();
-    let task = ClientTask {
-        request,
-        response_target: ResponseTarget::Capture(tx),
-    };
+    let task = ClientTask::new(request, ResponseTarget::Capture(tx));
     if let Err(err) = state.request_queue.enqueue_to_node(worker.to_string(), task) {
         log::warn(format!("failed to enqueue probe to worker={worker}: {err}"));
         return None;

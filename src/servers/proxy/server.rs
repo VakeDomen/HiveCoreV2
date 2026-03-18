@@ -2,6 +2,7 @@ use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
+use std::time::Instant;
 
 use crate::app::AppState;
 use crate::servers::proxy::admission::authorize_request;
@@ -34,6 +35,7 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
 }
 
 fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<()> {
+    let started_at = Instant::now();
     let request = match read_request(&stream) {
         Ok(request) => request,
         Err(err) => {
@@ -47,6 +49,13 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
             403 => "Forbidden",
             _ => "Unauthorized",
         };
+        log::warn(format!(
+            "rejected client request method={} uri={} status={} total={}",
+            request.method,
+            request.uri,
+            log::bold(status.to_string()),
+            log::bold(log::format_duration(started_at.elapsed()))
+        ));
         return HttpResponse::new(status, reason, Vec::new()).write_to(&mut stream);
     }
 
@@ -55,12 +64,33 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
     let visible_key = authorized_key(&state, &request);
 
     match plan_request(&state, &request, visible_key.as_ref()) {
-        RoutePlan::Local(response) => response.write_to(&mut stream),
+        RoutePlan::Local(response) => {
+            let status_code = response.status_code;
+            response.write_to(&mut stream)?;
+            log::info(format!(
+                "served local request method={} uri={} status={} total={}",
+                request_method,
+                request_uri,
+                log::bold(status_code.to_string()),
+                log::bold(log::format_duration(started_at.elapsed()))
+            ));
+            Ok(())
+        }
         RoutePlan::Reject {
             status,
             reason,
             message,
-        } => HttpResponse::new(status, reason, message.as_bytes().to_vec()).write_to(&mut stream),
+        } => {
+            log::warn(format!(
+                "rejected client request method={} uri={} status={} total={} reason={}",
+                request_method,
+                request_uri,
+                log::bold(status.to_string()),
+                log::bold(log::format_duration(started_at.elapsed())),
+                message
+            ));
+            HttpResponse::new(status, reason, message.as_bytes().to_vec()).write_to(&mut stream)
+        }
         RoutePlan::QueueByModel(model) => {
             let task = client_task(request, &stream)?;
             enqueue_model(&state, model, task, &request_method, &request_uri, &mut stream)
@@ -73,10 +103,10 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
 }
 
 fn client_task(request: HttpRequest, stream: &TcpStream) -> io::Result<ClientTask> {
-    Ok(ClientTask {
+    Ok(ClientTask::new(
         request,
-        response_target: ResponseTarget::ProxyClient(stream.try_clone()?),
-    })
+        ResponseTarget::ProxyClient(stream.try_clone()?),
+    ))
 }
 
 fn enqueue_model(
@@ -96,10 +126,6 @@ fn enqueue_model(
             .write_to(stream);
     }
 
-    log::info(format!(
-        "accepted client request method={} uri={}",
-        request_method, request_uri
-    ));
     Ok(())
 }
 
@@ -120,10 +146,6 @@ fn enqueue_node(
             .write_to(stream);
     }
 
-    log::info(format!(
-        "accepted client request method={} uri={}",
-        request_method, request_uri
-    ));
     Ok(())
 }
 

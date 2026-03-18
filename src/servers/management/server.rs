@@ -2,6 +2,7 @@ use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
+use std::time::Instant;
 
 use crate::app::{AppState, authorize_admin};
 use crate::servers::management::routes;
@@ -29,6 +30,7 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
 }
 
 fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<()> {
+    let started_at = Instant::now();
     let request = match read_request(&stream) {
         Ok(request) => request,
         Err(err) => {
@@ -45,11 +47,6 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         return HttpResponse::new(403, "Unauthorized", Vec::new()).write_to(&mut stream);
     }
 
-    log::info(format!(
-        "management request method={} uri={}",
-        request.method, request.uri
-    ));
-
     let response = match (request.method.as_str(), request.uri.as_str()) {
         ("GET", "/queue") => routes::queue::get_queue(&state),
         ("GET", "/worker/status") => routes::workers::get_status(&state),
@@ -63,5 +60,14 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         _ => HttpResponse::new(404, "Not Found", Vec::new()),
     };
 
-    response.write_to(&mut stream)
+    let status_code = response.status_code;
+    response.write_to(&mut stream)?;
+    log::info(format!(
+        "management request method={} uri={} status={} total={}",
+        request.method,
+        request.uri,
+        log::bold(status_code.to_string()),
+        log::bold(log::format_duration(started_at.elapsed()))
+    ));
+    Ok(())
 }
