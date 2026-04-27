@@ -12,15 +12,24 @@ pub struct ClientTask {
     pub request: HttpRequest,
     pub response_target: ResponseTarget,
     pub queued_at: Instant,
+    pub user_name: Option<String>,
+    pub model: Option<String>,
 }
 
 impl ClientTask {
-    pub fn new(request: HttpRequest, response_target: ResponseTarget) -> Self {
+    pub fn new(
+        request: HttpRequest,
+        response_target: ResponseTarget,
+        user_name: Option<String>,
+        model: Option<String>,
+    ) -> Self {
         Self {
             id: NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed),
             request,
             response_target,
             queued_at: Instant::now(),
+            user_name,
+            model,
         }
     }
 

@@ -22,7 +22,7 @@ pub fn post_worker_command(state: &AppState, request: &HttpRequest) -> HttpRespo
         body: Vec::new(),
     };
 
-    let task = ClientTask::new(synthetic, ResponseTarget::Ignore);
+    let task = ClientTask::new(synthetic, ResponseTarget::Ignore, None, None);
     if state
         .request_queue
         .enqueue_to_node(payload.worker, task)

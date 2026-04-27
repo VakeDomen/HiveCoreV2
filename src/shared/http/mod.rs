@@ -7,6 +7,43 @@ pub mod models;
 pub use models::http_request::HttpRequest;
 pub use models::http_response::HttpResponse;
 
+/// Token counts extracted from an LLM response.
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+/// Usage event sent to the stats worker via the mpsc channel.
+pub struct UsageEvent {
+    pub key_name: String,
+    pub model: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub duration_ms: u64,
+    pub created_at: u64, // unix timestamp in seconds
+}
+
+/// Try to parse token usage from a JSON string (last SSE chunk or full body).
+/// Supports both OpenAI format (`usage.prompt_tokens`, `usage.completion_tokens`)
+/// and Ollama format (`prompt_eval_count`, `eval_count`).
+pub fn parse_usage_json(text: &str) -> Option<TokenUsage> {
+    let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
+
+    // Try OpenAI format first
+    if let Some(usage) = parsed.get("usage") {
+        return Some(TokenUsage {
+            prompt_tokens: usage.get("prompt_tokens")?.as_u64()?,
+            completion_tokens: usage.get("completion_tokens")?.as_u64()?,
+        });
+    }
+
+    // Fall back to Ollama format
+    Some(TokenUsage {
+        prompt_tokens: parsed.get("prompt_eval_count")?.as_u64()?,
+        completion_tokens: parsed.get("eval_count")?.as_u64()?,
+    })
+}
+
 impl HttpResponse {
     pub fn new(status_code: u16, reason: &'static str, body: Vec<u8>) -> Self {
         Self {

@@ -62,6 +62,10 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
     let request_method = request.method.clone();
     let request_uri = request.uri.clone();
     let visible_key = authorized_key(&state, &request);
+    let user_name = visible_key
+        .as_ref()
+        .map(|k| k.name.clone())
+        .unwrap_or_else(|| String::from("Unauthenticated"));
 
     match plan_request(&state, &request, visible_key.as_ref()) {
         RoutePlan::Local(response) => {
@@ -91,21 +95,29 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
             ));
             HttpResponse::new(status, reason, message.as_bytes().to_vec()).write_to(&mut stream)
         }
-        RoutePlan::QueueByModel(model) => {
-            let task = client_task(request, &stream)?;
-            enqueue_model(&state, model, task, &request_method, &request_uri, &mut stream)
+       RoutePlan::QueueByModel(model) => {
+           let task = client_task(request, &stream, user_name, Some(model.clone()))?;
+           enqueue_model(&state, model, task, &request_method, &request_uri, &mut stream)
         }
         RoutePlan::QueueByNode(worker) => {
-            let task = client_task(request, &stream)?;
+            let model = crate::shared::http::extract_json_value(&request.body, "model");
+            let task = client_task(request, &stream, user_name, model)?;
             enqueue_node(&state, worker, task, &request_method, &request_uri, &mut stream)
         }
     }
 }
 
-fn client_task(request: HttpRequest, stream: &TcpStream) -> io::Result<ClientTask> {
+fn client_task(
+    request: HttpRequest,
+    stream: &TcpStream,
+    user_name: String,
+    model: Option<String>,
+) -> io::Result<ClientTask> {
     Ok(ClientTask::new(
         request,
         ResponseTarget::ProxyClient(stream.try_clone()?),
+        Some(user_name),
+        model,
     ))
 }
 
@@ -177,7 +189,11 @@ mod tests {
             database_url: db_path.to_string_lossy().into_owned(),
             ..Config::default()
         };
-        Ok((AppState::new(config)?, db_path))
+        let (_stats_tx, _stats_rx): (
+            std::sync::mpsc::Sender<crate::shared::http::UsageEvent>,
+            std::sync::mpsc::Receiver<crate::shared::http::UsageEvent>,
+        ) = std::sync::mpsc::channel();
+        Ok((AppState::new(config, _stats_tx)?, db_path))
     }
 
     fn request_with_auth(token: Option<&str>, body: &[u8]) -> HttpRequest {

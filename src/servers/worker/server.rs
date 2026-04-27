@@ -2,7 +2,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::app::AppState;
 use crate::auth::Role;
@@ -11,7 +11,8 @@ use crate::servers::proxy::models::worker_http_response::WorkerHttpResponse;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
 use crate::servers::worker::models::worker_status::WorkerStatus;
 use crate::shared::http::{
-    HttpRequest, HttpResponse, read_request_from_reader, serialize_request, write_framed_request,
+    read_request_from_reader, serialize_request, write_framed_request, HttpRequest, HttpResponse,
+    TokenUsage, UsageEvent,
 };
 use crate::shared::log;
 
@@ -189,19 +190,21 @@ fn handle_poll(
         let request_method = task.request.method.clone();
         let request_uri = task.request.uri.clone();
         let queue_wait = task.queue_wait();
+        let user_name = task.user_name.as_deref().unwrap_or("Unauthenticated");
         let started_at = Instant::now();
         let bytes = serialize_request(&task.request);
         log::info(format!(
-            "forwarding request id={} to worker={} method={} uri={} queue_wait={}",
+            "forwarding request id={} to worker={} user={} method={} uri={} queue_wait={}",
             log::bold(request_id.to_string()),
             log::bold(worker_name),
+            log::bold(user_name),
             request_method,
             request_uri,
             log::bold(log::format_duration(queue_wait))
         ));
         write_framed_request(writer, &bytes)?;
 
-        let status_code = match task.response_target {
+        let (status_code, token_usage): (u16, Option<TokenUsage>) = match task.response_target {
             ResponseTarget::ProxyClient(mut client_stream) => {
                 proxy_worker_response(reader, &mut client_stream)?
             }
@@ -209,17 +212,40 @@ fn handle_poll(
                 let response = capture_worker_response(reader)?;
                 let status_code = response.status_code;
                 let _ = sender.send(response);
-                status_code
+                (status_code, None)
             }
-            ResponseTarget::Ignore => discard_worker_response(reader)?,
+            ResponseTarget::Ignore => discard_worker_response(reader).map(|sc| (sc, None))?,
         };
 
-        touch_worker(state, worker_name, None, WorkerPhase::Polling);
         let worker_time = started_at.elapsed();
+
+        // Fire-and-forget usage event when token counts are available
+        if let Some(tu) = token_usage {
+            let model = task.model.clone().unwrap_or_default();
+            let key_name: String = task.user_name.clone().unwrap_or_else(|| "Unauthenticated".to_string());
+            let duration_ms = worker_time.as_millis() as u64;
+            let created_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            let usage_event = UsageEvent {
+                key_name,
+                model,
+                prompt_tokens: tu.prompt_tokens,
+                completion_tokens: tu.completion_tokens,
+                duration_ms,
+                created_at,
+            };
+            let _ = state.stats_tx.send(usage_event);
+        }
+
+        touch_worker(state, worker_name, None, WorkerPhase::Polling);
         let total_time = queue_wait + worker_time;
         log::success(format!(
-            "resolved request id={} worker={} method={} uri={} status={} wait={} worker_time={} total={}",
+            "resolved request id={} user={} worker={} method={} uri={} status={} wait={} worker_time={} total={}",
             log::bold(request_id.to_string()),
+            log::bold(user_name),
             log::bold(worker_name),
             request_method,
             request_uri,
@@ -245,12 +271,12 @@ fn handle_poll(
 fn proxy_worker_response(
     reader: &mut BufReader<TcpStream>,
     client_stream: &mut TcpStream,
-) -> io::Result<u16> {
+) -> io::Result<(u16, Option<TokenUsage>)> {
     let mut status_line = String::new();
     reader.read_line(&mut status_line)?;
     if status_line.trim().is_empty() {
         log::warn("worker returned empty status line");
-        return reject_request(client_stream.try_clone()?, 502, "Bad Gateway");
+        return reject_request(client_stream.try_clone()?, 502, "Bad Gateway").map(|sc| (sc, None));
     }
 
     let mut headers = Vec::new();
@@ -282,6 +308,8 @@ fn proxy_worker_response(
     }
     client_stream.write_all(b"\r\n")?;
 
+    let mut last_text: Option<String> = None;
+
     if chunked {
         loop {
             let mut size_line = String::new();
@@ -297,20 +325,27 @@ fn proxy_worker_response(
             let mut chunk = vec![0_u8; size + 2];
             reader.read_exact(&mut chunk)?;
             client_stream.write_all(&chunk)?;
+            // Save the text content of each chunk so we can parse the last one for usage
+            let payload: &[u8] = &chunk[..size];
+            last_text = Some(String::from_utf8_lossy(payload).to_string());
         }
     } else if let Some(length) = content_length {
         let mut body = vec![0_u8; length];
         reader.read_exact(&mut body)?;
         client_stream.write_all(&body)?;
+        last_text = Some(String::from_utf8_lossy(&body).to_string());
     } else {
         let mut body = Vec::new();
         reader.read_to_end(&mut body)?;
         client_stream.write_all(&body)?;
+        last_text = Some(String::from_utf8_lossy(&body).to_string());
     }
 
     client_stream.flush()?;
 
-    Ok(parse_status_code(&status_line))
+    let status_code = parse_status_code(&status_line);
+    let token_usage = last_text.and_then(|text| crate::shared::http::parse_usage_json(&text));
+    Ok((status_code, token_usage))
 }
 
 fn discard_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<u16> {

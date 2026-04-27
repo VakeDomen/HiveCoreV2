@@ -13,18 +13,20 @@ pub struct RequestQueue {
 
 impl RequestQueue {
     pub fn enqueue_model(&self, model: String, task: ClientTask) -> Result<(), &'static str> {
-        let mut guard = self
-            .model_queue
-            .lock()
-            .map_err(|_| "model queue poisoned")?;
-        let queued_model = model.clone();
-        let request_id = task.id;
-        let method = task.request.method.clone();
-        let uri = task.request.uri.clone();
-        guard.entry(model).or_default().push_back(task);
-        log::info(format!(
-            "queued request id={} route=model:{} method={} uri={}",
+       let mut guard = self
+           .model_queue
+           .lock()
+           .map_err(|_| "model queue poisoned")?;
+       let queued_model = model.clone();
+       let request_id = task.id;
+       let method = task.request.method.clone();
+       let uri = task.request.uri.clone();
+       guard.entry(model).or_default().push_back(task);
+       let user_name = guard.get(&queued_model).and_then(|q| q.back()).and_then(|t| t.user_name.as_deref()).unwrap_or("Unauthenticated");
+       log::info(format!(
+           "queued request id={} user={} route=model:{} method={} uri={}",
             log::bold(request_id.to_string()),
+            log::bold(user_name),
             log::bold(&queued_model),
             method,
             uri
@@ -33,15 +35,18 @@ impl RequestQueue {
     }
 
     pub fn enqueue_node(&self, node: String, task: ClientTask) -> Result<(), &'static str> {
-        let mut guard = self.node_queue.lock().map_err(|_| "node queue poisoned")?;
         let request_id = task.id;
+        let cloned_user_name = task.user_name.clone();
+        let user_name = cloned_user_name.as_deref().unwrap_or("Unauthenticated");
         let method = task.request.method.clone();
         let uri = task.request.uri.clone();
         let node_name = node.clone();
+        let mut guard = self.node_queue.lock().map_err(|_| "node queue poisoned")?;
         guard.entry(node).or_default().push_back(task);
         log::info(format!(
-            "queued request id={} route=worker:{} method={} uri={}",
+            "queued request id={} user={} route=worker:{} method={} uri={}",
             log::bold(request_id.to_string()),
+            log::bold(user_name),
             log::bold(&node_name),
             method,
             uri
@@ -54,10 +59,12 @@ impl RequestQueue {
             if let Some(queue) = node_guard.get_mut(worker_name) {
                 if let Some(task) = queue.pop_front() {
                     let wait = log::format_duration(task.queue_wait());
+                    let user_name = task.user_name.as_deref().unwrap_or("Unauthenticated");
                     log::info(format!(
-                        "dispatch request id={} worker={} route=targeted wait={}",
+                        "dispatch request id={} worker={} user={} route=targeted wait={}",
                         log::bold(task.id.to_string()),
                         log::bold(worker_name),
+                        log::bold(user_name),
                         log::bold(wait)
                     ));
                     return Some(task);
@@ -72,10 +79,12 @@ impl RequestQueue {
             if let Some(queue) = model_guard.get_mut(tag) {
                 if let Some(task) = queue.pop_front() {
                     let wait = log::format_duration(task.queue_wait());
+                    let user_name = task.user_name.as_deref().unwrap_or("Unauthenticated");
                     log::info(format!(
-                        "dispatch request id={} worker={} route=model:{} wait={}",
+                        "dispatch request id={} worker={} user={} route=model:{} wait={}",
                         log::bold(task.id.to_string()),
                         log::bold(worker_name),
+                        log::bold(user_name),
                         log::bold(tag),
                         log::bold(wait)
                     ));

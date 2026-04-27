@@ -54,9 +54,9 @@ fn dispatch_capture(
     timeout: Duration,
 ) -> Option<WorkerHttpResponse> {
     let (tx, rx) = mpsc::channel();
-    let task = ClientTask::new(request, ResponseTarget::Capture(tx));
+    let task = ClientTask::new(request, ResponseTarget::Capture(tx), None, None);
     if let Err(err) = state.request_queue.enqueue_to_node(worker.to_string(), task) {
-        log::warn(format!("failed to enqueue probe to worker={worker}: {err}"));
+            log::warn(format!("failed to enqueue probe to worker={worker}: {err}"));
         return None;
     }
     rx.recv_timeout(timeout).ok()

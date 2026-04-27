@@ -19,7 +19,11 @@ fn main() -> io::Result<()> {
         shared::log::bold(config.management_connection_port.to_string()),
         shared::log::bold(&config.database_url)
     ));
-    let state = Arc::new(AppState::new(config.clone())?);
+    let (stats_tx, _stats_rx): (
+        std::sync::mpsc::Sender<shared::http::UsageEvent>,
+        std::sync::mpsc::Receiver<shared::http::UsageEvent>,
+    ) = std::sync::mpsc::channel();
+   let state = Arc::new(AppState::new(config.clone(), stats_tx)?);
 
     let client_state = Arc::clone(&state);
     let worker_state = Arc::clone(&state);
