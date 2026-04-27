@@ -26,6 +26,16 @@ enum ProxyEndpoint {
     Push,
     Delete,
     Version,
+
+    OpenAiChatCompletions,
+    OpenAiCompletions,
+    OpenAiEmbeddings,
+    OpenAiModels,
+    OpenAiModel { model: String },
+
+    // LoadModel { model: String },
+    // UnloadModel { model: String },
+    Health,
     Unknown,
 }
 
@@ -50,39 +60,237 @@ pub fn plan_request(
         ProxyEndpoint::Generate | ProxyEndpoint::Chat | ProxyEndpoint::Embed => {
             route_by_required_model(request)
         }
+
+        ProxyEndpoint::OpenAiChatCompletions => route_openai_chat_request(request),
+        ProxyEndpoint::OpenAiCompletions => route_openai_completion_request(request),
+        ProxyEndpoint::OpenAiEmbeddings => route_openai_embedding_request(request),
+        ProxyEndpoint::OpenAiModels => local_openai_models_response(state, visible_key),
+        ProxyEndpoint::OpenAiModel { model } => {
+            local_openai_model_response(state, visible_key, &model)
+        }
+
+        // ProxyEndpoint::LoadModel { model } => route_load_model_request(state, visible_key, &model),
+        // ProxyEndpoint::UnloadModel { model } => {
+        //     route_unload_model_request(state, visible_key, &model)
+        // }
         ProxyEndpoint::Tags => local_tags_response(state, visible_key),
         ProxyEndpoint::Ps => local_ps_response(state, visible_key),
         ProxyEndpoint::Version => local_version_response(state),
+        ProxyEndpoint::Health => local_health_response(state),
         ProxyEndpoint::Show => route_show_request(state, request, visible_key),
         ProxyEndpoint::Create => route_create_request(state, request, visible_key),
         ProxyEndpoint::Copy => route_copy_request(state, request, visible_key),
         ProxyEndpoint::Pull => route_pull_request(state),
         ProxyEndpoint::Push => route_push_request(state, request, visible_key),
         ProxyEndpoint::Delete => route_delete_request(state, request, visible_key),
+
         ProxyEndpoint::Unknown => RoutePlan::Reject {
             status: 404,
             reason: "Not Found",
-            message: "unknown Ollama endpoint",
+            message: "",
         },
     }
 }
 
 fn classify_endpoint(request: &HttpRequest) -> ProxyEndpoint {
-    match (request.method.as_str(), request.uri.as_str()) {
-        ("POST", "/api/generate") => ProxyEndpoint::Generate,
-        ("POST", "/api/chat") => ProxyEndpoint::Chat,
-        ("POST", "/api/embed") | ("POST", "/api/embeddings") => ProxyEndpoint::Embed,
-        ("GET", "/api/tags") => ProxyEndpoint::Tags,
-        ("GET", "/api/ps") => ProxyEndpoint::Ps,
-        ("POST", "/api/show") => ProxyEndpoint::Show,
-        ("POST", "/api/create") => ProxyEndpoint::Create,
-        ("POST", "/api/copy") => ProxyEndpoint::Copy,
-        ("POST", "/api/pull") => ProxyEndpoint::Pull,
-        ("POST", "/api/push") => ProxyEndpoint::Push,
-        ("DELETE", "/api/delete") => ProxyEndpoint::Delete,
-        ("GET", "/api/version") => ProxyEndpoint::Version,
-        _ => ProxyEndpoint::Unknown,
+    let method = request.method.as_str();
+    let uri = request.uri.as_str();
+
+    match (method, uri) {
+        ("POST", "/api/generate") => return ProxyEndpoint::Generate,
+        ("POST", "/api/chat") => return ProxyEndpoint::Chat,
+        ("POST", "/api/embed") | ("POST", "/api/embeddings") => return ProxyEndpoint::Embed,
+        ("GET", "/api/tags") => return ProxyEndpoint::Tags,
+        ("GET", "/api/ps") => return ProxyEndpoint::Ps,
+        ("POST", "/api/show") => return ProxyEndpoint::Show,
+        ("POST", "/api/create") => return ProxyEndpoint::Create,
+        ("POST", "/api/copy") => return ProxyEndpoint::Copy,
+        ("POST", "/api/pull") => return ProxyEndpoint::Pull,
+        ("POST", "/api/push") => return ProxyEndpoint::Push,
+        ("DELETE", "/api/delete") => return ProxyEndpoint::Delete,
+        ("GET", "/api/version") => return ProxyEndpoint::Version,
+        ("GET", "/health") => return ProxyEndpoint::Health,
+
+        ("POST", "/v1/chat/completions") => return ProxyEndpoint::OpenAiChatCompletions,
+        ("POST", "/v1/completions") => return ProxyEndpoint::OpenAiCompletions,
+        ("POST", "/v1/embeddings") => return ProxyEndpoint::OpenAiEmbeddings,
+        ("GET", "/v1/models") => return ProxyEndpoint::OpenAiModels,
+        _ => {}
     }
+
+    if method == "GET" {
+        if let Some(model) = strip_prefix_segment(uri, "/v1/models/") {
+            return ProxyEndpoint::OpenAiModel { model };
+        }
+    }
+
+    // if method == "POST" {
+    //     if let Some(model) = strip_suffix_segment(uri, "/api/models/", "/load") {
+    //         return ProxyEndpoint::LoadModel { model };
+    //     }
+    //     if let Some(model) = strip_suffix_segment(uri, "/api/models/", "/unload") {
+    //         return ProxyEndpoint::UnloadModel { model };
+    //     }
+    // }
+
+    ProxyEndpoint::Unknown
+}
+
+fn route_openai_chat_request(request: &HttpRequest) -> RoutePlan {
+    match json_string_field(&request.body, "model") {
+        Some(model) => RoutePlan::QueueByModel(model),
+        None => missing_field("model"),
+    }
+}
+
+fn route_openai_completion_request(request: &HttpRequest) -> RoutePlan {
+    match json_string_field(&request.body, "model") {
+        Some(model) => RoutePlan::QueueByModel(model),
+        None => missing_field("model"),
+    }
+}
+
+fn route_openai_embedding_request(request: &HttpRequest) -> RoutePlan {
+    match json_string_field(&request.body, "model") {
+        Some(model) => RoutePlan::QueueByModel(model),
+        None => missing_field("model"),
+    }
+}
+
+fn route_load_model_request(
+    state: &AppState,
+    visible_key: Option<&KeyRecord>,
+    model: &str,
+) -> RoutePlan {
+    if !model_visible(visible_key, model) {
+        return not_found_for_masked_model();
+    }
+
+    let owners = model_owners(state, model);
+    if !owners.is_empty() {
+        return RoutePlan::QueueByNode(owners[0].clone());
+    }
+
+    let workers = connected_workers(state);
+    if workers.is_empty() {
+        return no_workers_available();
+    }
+
+    RoutePlan::QueueByNode(workers[0].clone())
+}
+
+fn route_unload_model_request(
+    state: &AppState,
+    visible_key: Option<&KeyRecord>,
+    model: &str,
+) -> RoutePlan {
+    if !model_visible(visible_key, model) {
+        return not_found_for_masked_model();
+    }
+
+    let owners = model_owners(state, model);
+    if owners.is_empty() {
+        return no_workers_available();
+    }
+
+    RoutePlan::QueueByNode(owners[0].clone())
+}
+
+fn local_health_response(state: &AppState) -> RoutePlan {
+    let workers = connected_workers(state);
+    RoutePlan::Local(json_response(json!({
+        "status": "ok",
+        "workers": {
+            "connected": workers.len()
+        },
+        "queue": {
+            "healthy": true
+        },
+        "kv_cache": {
+            "supported": false
+        }
+    })))
+}
+
+fn strip_prefix_segment(uri: &str, prefix: &str) -> Option<String> {
+    let rest = uri.strip_prefix(prefix)?;
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(rest.to_string())
+}
+
+fn strip_suffix_segment(uri: &str, prefix: &str, suffix: &str) -> Option<String> {
+    let rest = uri.strip_prefix(prefix)?;
+    let model = rest.strip_suffix(suffix)?;
+    if model.is_empty() || model.contains('/') {
+        return None;
+    }
+    Some(model.to_string())
+}
+
+fn local_openai_models_response(state: &AppState, visible_key: Option<&KeyRecord>) -> RoutePlan {
+    let workers = connected_workers(state);
+    if workers.is_empty() {
+        return RoutePlan::Local(json_response(json!({
+            "object": "list",
+            "data": []
+        })));
+    }
+
+    let mut by_name = BTreeMap::new();
+    for value in parallel_probe_json(state, workers, "/api/tags", None) {
+        if let Some(models) = value.get("models").and_then(Value::as_array) {
+            for model in models {
+                let Some(name) = model.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                if !model_visible(visible_key, name) {
+                    continue;
+                }
+
+                by_name.entry(name.to_string()).or_insert_with(|| {
+                    json!({
+                        "id": name,
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "ollama"
+                    })
+                });
+            }
+        }
+    }
+
+    RoutePlan::Local(json_response(json!({
+        "object": "list",
+        "data": by_name.into_values().collect::<Vec<_>>()
+    })))
+}
+
+fn local_openai_model_response(
+    state: &AppState,
+    visible_key: Option<&KeyRecord>,
+    model: &str,
+) -> RoutePlan {
+    if !model_visible(visible_key, model) {
+        return not_found_for_masked_model();
+    }
+
+    let owners = model_owners(state, model);
+    if owners.is_empty() {
+        return RoutePlan::Reject {
+            status: 404,
+            reason: "Not Found",
+            message: "model not found",
+        };
+    }
+
+    RoutePlan::Local(json_response(json!({
+        "id": model,
+        "object": "model",
+        "created": 0,
+        "owned_by": "ollama"
+    })))
 }
 
 fn route_by_required_model(request: &HttpRequest) -> RoutePlan {
@@ -204,7 +412,9 @@ fn local_tags_response(state: &AppState, visible_key: Option<&KeyRecord>) -> Rou
                     if !model_visible(visible_key, name) {
                         continue;
                     }
-                    by_name.entry(name.to_string()).or_insert_with(|| model.clone());
+                    by_name
+                        .entry(name.to_string())
+                        .or_insert_with(|| model.clone());
                 }
             }
         }
@@ -292,8 +502,6 @@ fn model_owners(state: &AppState, model: &str) -> Vec<String> {
 
 fn missing_field(field: &'static str) -> RoutePlan {
     let message = match field {
-        "source" => "request body is missing the source field",
-        "model" => "request body is missing the model field",
         _ => "request body is missing a required field",
     };
     RoutePlan::Reject {
@@ -333,7 +541,9 @@ fn json_response(value: Value) -> HttpResponse {
     match serde_json::to_string(&value) {
         Ok(body) => HttpResponse::json(200, "OK", body),
         Err(err) => {
-            log::error(format!("failed to serialize proxy aggregate response: {err}"));
+            log::error(format!(
+                "failed to serialize proxy aggregate response: {err}"
+            ));
             HttpResponse::new(500, "Internal Server Error", Vec::new())
         }
     }
@@ -407,7 +617,10 @@ mod tests {
     use super::plan_request;
 
     fn temp_db_path(test_name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("hive_core_v2_planner_{test_name}_{}.db", Uuid::new_v4()))
+        std::env::temp_dir().join(format!(
+            "hive_core_v2_planner_{test_name}_{}.db",
+            Uuid::new_v4()
+        ))
     }
 
     fn request(method: &str, uri: &str, body: &[u8]) -> HttpRequest {
@@ -466,7 +679,10 @@ mod tests {
     fn tags_is_local_aggregate() -> io::Result<()> {
         let (mut state, db) = test_state("tags")?;
         let mut workers = HashMap::new();
-        workers.insert("worker-a".to_string(), worker_status("worker-a", vec!["llama3"]));
+        workers.insert(
+            "worker-a".to_string(),
+            worker_status("worker-a", vec!["llama3"]),
+        );
         state.workers = RwLock::new(workers);
         let req = request("GET", "/api/tags", b"");
         match plan_request(&state, &req, None) {
@@ -481,9 +697,16 @@ mod tests {
     fn copy_routes_by_source_owner() -> io::Result<()> {
         let (mut state, db) = test_state("copy")?;
         let mut workers = HashMap::new();
-        workers.insert("worker-a".to_string(), worker_status("worker-a", vec!["llama3"]));
+        workers.insert(
+            "worker-a".to_string(),
+            worker_status("worker-a", vec!["llama3"]),
+        );
         state.workers = RwLock::new(workers);
-        let req = request("POST", "/api/copy", br#"{"source":"llama3","destination":"copy"}"#);
+        let req = request(
+            "POST",
+            "/api/copy",
+            br#"{"source":"llama3","destination":"copy"}"#,
+        );
         match plan_request(&state, &req, None) {
             RoutePlan::QueueByNode(worker) => assert_eq!(worker, "worker-a"),
             _ => panic!("expected node route"),
@@ -512,8 +735,14 @@ mod tests {
     fn delete_targets_single_owner() -> io::Result<()> {
         let (mut state, db) = test_state("delete")?;
         let mut workers = HashMap::new();
-        workers.insert("worker-a".to_string(), worker_status("worker-a", vec!["llama3"]));
-        workers.insert("worker-b".to_string(), worker_status("worker-b", vec!["llama3"]));
+        workers.insert(
+            "worker-a".to_string(),
+            worker_status("worker-a", vec!["llama3"]),
+        );
+        workers.insert(
+            "worker-b".to_string(),
+            worker_status("worker-b", vec!["llama3"]),
+        );
         state.workers = RwLock::new(workers);
         let req = request("DELETE", "/api/delete", br#"{"model":"llama3"}"#);
         match plan_request(&state, &req, None) {
