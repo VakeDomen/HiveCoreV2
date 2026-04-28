@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::app::AppState;
-use crate::servers::proxy::models::client_task::ClientTask;
+use crate::servers::proxy::models::client_task::{ClientTask, RequestContext};
 use crate::servers::proxy::models::response_target::ResponseTarget;
 use crate::servers::proxy::models::worker_http_response::WorkerHttpResponse;
 use crate::shared::http::HttpRequest;
@@ -54,9 +54,9 @@ fn dispatch_capture(
     timeout: Duration,
 ) -> Option<WorkerHttpResponse> {
     let (tx, rx) = mpsc::channel();
-    let task = ClientTask::new(request, ResponseTarget::Capture(tx), None, None);
+    let task = ClientTask::new(request, ResponseTarget::Capture(tx), RequestContext::default());
     if let Err(err) = state.request_queue.enqueue_to_node(worker.to_string(), task) {
-            log::warn(format!("failed to enqueue probe to worker={worker}: {err}"));
+        log::warn(format!("failed to enqueue probe to worker={worker}: {err}"));
         return None;
     }
     rx.recv_timeout(timeout).ok()

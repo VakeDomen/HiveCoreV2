@@ -9,6 +9,8 @@ pub struct Config {
     pub proxy_timeout_ms: u64,
     pub message_chunk_buffer_size: usize,
     pub database_url: String,
+    pub telegram_bot_token: Option<String>,
+    pub telegram_user_id: Option<i64>,
 }
 
 impl Default for Config {
@@ -23,6 +25,8 @@ impl Default for Config {
             proxy_timeout_ms: 60_000,
             message_chunk_buffer_size: 16_384,
             database_url: "sqlite.db".to_string(),
+            telegram_bot_token: None,
+            telegram_user_id: None,
         }
     }
 }

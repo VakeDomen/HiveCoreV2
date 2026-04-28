@@ -78,6 +78,12 @@ impl Config {
                 ("Database", "DATABASE_URL") => {
                     config.database_url = normalize_database_url(value);
                 }
+                ("Telegram", "BOT_TOKEN") => {
+                    config.telegram_bot_token = normalize_optional_string(value);
+                }
+                ("Telegram", "USER_ID") => {
+                    config.telegram_user_id = value.parse::<i64>().ok();
+                }
                 _ => {}
             }
         }
@@ -87,7 +93,7 @@ impl Config {
 
     fn to_ini(&self) -> String {
         format!(
-            "[Server]\nUSER_AUTHENTICATION = {}\nPROXY_PORT = {}\nNODE_CONNECTION_PORT = {}\nMANAGEMENT_CONNECTION_PORT = {}\n\n[Connection]\nPOLLING_NODE_CONNECTION_TIMEOUT = {}\nWORKING_NODE_CONNECTION_TIMEOUT = {}\nPROXY_TIMEOUT_MS = {}\nMESSAGE_CHUNK_BUFFER_SIZE = {}\n\n[Database]\nDATABASE_URL = {}\n",
+            "[Server]\nUSER_AUTHENTICATION = {}\nPROXY_PORT = {}\nNODE_CONNECTION_PORT = {}\nMANAGEMENT_CONNECTION_PORT = {}\n\n[Connection]\nPOLLING_NODE_CONNECTION_TIMEOUT = {}\nWORKING_NODE_CONNECTION_TIMEOUT = {}\nPROXY_TIMEOUT_MS = {}\nMESSAGE_CHUNK_BUFFER_SIZE = {}\n\n[Database]\nDATABASE_URL = {}\n\n[Telegram]\nBOT_TOKEN = {}\nUSER_ID = {}\n",
             self.user_authentication,
             self.proxy_port,
             self.node_connection_port,
@@ -96,7 +102,9 @@ impl Config {
             self.working_node_connection_timeout,
             self.proxy_timeout_ms,
             self.message_chunk_buffer_size,
-            self.database_url
+            self.database_url,
+            self.telegram_bot_token.as_deref().unwrap_or(""),
+            self.telegram_user_id.map(|value| value.to_string()).unwrap_or_default()
         )
     }
 }
@@ -107,4 +115,9 @@ fn normalize_database_url(value: &str) -> String {
         .unwrap_or(value)
         .trim()
         .to_string()
+}
+
+fn normalize_optional_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }

@@ -640,7 +640,8 @@ mod tests {
             proxy_timeout_ms: 5,
             ..Config::default()
         };
-        Ok((AppState::new(config)?, db_path))
+        let (stats_tx, _stats_rx) = std::sync::mpsc::channel();
+        Ok((AppState::new(config, stats_tx)?, db_path))
     }
 
     fn worker_status(name: &str, tags: Vec<&str>) -> WorkerStatus {

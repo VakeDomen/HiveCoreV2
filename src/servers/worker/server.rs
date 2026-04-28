@@ -190,7 +190,7 @@ fn handle_poll(
         let request_method = task.request.method.clone();
         let request_uri = task.request.uri.clone();
         let queue_wait = task.queue_wait();
-        let user_name = task.user_name.as_deref().unwrap_or("Unauthenticated");
+        let user_name = task.context.key_name.as_deref().unwrap_or("Unauthenticated");
         let started_at = Instant::now();
         let bytes = serialize_request(&task.request);
         log::info(format!(
@@ -221,8 +221,12 @@ fn handle_poll(
 
         // Fire-and-forget usage event when token counts are available
         if let Some(tu) = token_usage {
-            let model = task.model.clone().unwrap_or_default();
-            let key_name: String = task.user_name.clone().unwrap_or_else(|| "Unauthenticated".to_string());
+            let model = task.context.model.clone().unwrap_or_default();
+            let key_name = task
+                .context
+                .key_name
+                .clone()
+                .unwrap_or_else(|| "Unauthenticated".to_string());
             let duration_ms = worker_time.as_millis() as u64;
             let created_at = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
