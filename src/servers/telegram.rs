@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io;
 use std::sync::Arc;
 use std::thread;
@@ -267,29 +267,76 @@ fn format_usage_report(day: NaiveDate, rows: &[DailyUsageRow]) -> String {
     let total_duration = rows.iter().map(|row| row.duration_ms).sum::<u64>();
 
     let mut lines = vec![
-        format!("Usage report for {}:", day.format("%Y-%m-%d")),
+        format!("Usage report for {}", day.format("%Y-%m-%d")),
         format!(
-            "Totals: requests={} prompt={} completion={} duration={}",
+            "Total: {} req | {} prompt | {} completion | {}",
             total_requests,
-            total_prompt,
-            total_completion,
-            log::format_duration(Duration::from_millis(total_duration))
+            format_count(total_prompt),
+            format_count(total_completion),
+            format_duration_short(total_duration)
         ),
     ];
 
+    let mut grouped = BTreeMap::<&str, Vec<&DailyUsageRow>>::new();
     for row in rows {
+        grouped.entry(&row.key_name).or_default().push(row);
+    }
+
+    for (user, entries) in grouped {
+        let user_requests = entries.iter().map(|row| row.request_count).sum::<u64>();
+        let user_prompt = entries.iter().map(|row| row.prompt_tokens).sum::<u64>();
+        let user_completion = entries.iter().map(|row| row.completion_tokens).sum::<u64>();
+        let user_duration = entries.iter().map(|row| row.duration_ms).sum::<u64>();
+
+        lines.push(String::new());
         lines.push(format!(
-            "{} | {} | req={} prompt={} completion={} duration={}",
-            row.key_name,
-            row.model,
-            row.request_count,
-            row.prompt_tokens,
-            row.completion_tokens,
-            log::format_duration(Duration::from_millis(row.duration_ms))
+            "{}: {} req | {} prompt | {} completion | {}",
+            user,
+            user_requests,
+            format_count(user_prompt),
+            format_count(user_completion),
+            format_duration_short(user_duration)
         ));
+
+        for row in entries {
+            lines.push(format!(
+                "  - {} | {} req | {} / {} tok | {}",
+                row.model,
+                row.request_count,
+                format_count(row.prompt_tokens),
+                format_count(row.completion_tokens),
+                format_duration_short(row.duration_ms)
+            ));
+        }
     }
 
     lines.join("\n")
+}
+
+fn format_count(value: u64) -> String {
+    if value >= 1_000_000 {
+        let whole = value / 1_000_000;
+        let decimal = (value % 1_000_000) / 100_000;
+        format!("{whole}.{decimal}M")
+    } else if value >= 1_000 {
+        let whole = value / 1_000;
+        let decimal = (value % 1_000) / 100;
+        format!("{whole}.{decimal}k")
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_duration_short(duration_ms: u64) -> String {
+    let duration = Duration::from_millis(duration_ms);
+    let secs = duration.as_secs();
+    if secs >= 3600 {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        log::format_duration(duration)
+    }
 }
 
 fn send_daily_report_if_needed(
@@ -372,8 +419,9 @@ mod tests {
             }],
         );
 
-        assert!(report.contains("Usage report for 2026-04-28:"));
-        assert!(report.contains("Totals: requests=2 prompt=17 completion=5"));
-        assert!(report.contains("alice | bge-m3 | req=2"));
+        assert!(report.contains("Usage report for 2026-04-28"));
+        assert!(report.contains("Total: 2 req | 17 prompt | 5 completion"));
+        assert!(report.contains("alice: 2 req | 17 prompt | 5 completion"));
+        assert!(report.contains("  - bge-m3 | 2 req | 17 / 5 tok"));
     }
 }
