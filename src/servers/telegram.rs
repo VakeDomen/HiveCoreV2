@@ -30,7 +30,8 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
     let mut current_day = current_local_day();
 
     loop {
-        if let Err(err) = send_daily_report_if_needed(&client, &db, settings.user_id, &mut current_day)
+        if let Err(err) =
+            send_daily_report_if_needed(&client, &db, settings.user_id, &mut current_day)
         {
             log::warn(format!("telegram daily report failed: {err}"));
         }
@@ -43,7 +44,9 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
                         if !is_allowed_message(&message, settings.user_id) {
                             continue;
                         }
-                        if let Err(err) = handle_command(&client, &db, &state, settings.user_id, &message) {
+                        if let Err(err) =
+                            handle_command(&client, &db, &state, settings.user_id, &message)
+                        {
                             log::warn(format!("telegram command failed: {err}"));
                         }
                     }
@@ -99,7 +102,9 @@ impl TelegramClient {
             }))
             .send()
             .map_err(io::Error::other)?;
-        let body = response.json::<TelegramResponse<Vec<TelegramUpdate>>>().map_err(io::Error::other)?;
+        let body = response
+            .json::<TelegramResponse<Vec<TelegramUpdate>>>()
+            .map_err(io::Error::other)?;
         if body.ok {
             Ok(body.result)
         } else {
@@ -258,7 +263,10 @@ fn usage_text(db: &UsageTrackingDb, day: NaiveDate) -> io::Result<String> {
 
 fn format_usage_report(day: NaiveDate, rows: &[DailyUsageRow]) -> String {
     if rows.is_empty() {
-        return format!("Usage report for {}:\nNo usage recorded.", day.format("%Y-%m-%d"));
+        return format!(
+            "Usage report for {}:\nNo usage recorded.",
+            day.format("%Y-%m-%d")
+        );
     }
 
     let total_requests = rows.iter().map(|row| row.request_count).sum::<u64>();
@@ -268,12 +276,13 @@ fn format_usage_report(day: NaiveDate, rows: &[DailyUsageRow]) -> String {
 
     let mut lines = vec![
         format!("Usage report for {}", day.format("%Y-%m-%d")),
-        format!(
-            "Total: {} req | {} prompt | {} completion | {}",
+        String::new(),
+        "Overall".to_string(),
+        format_summary_line(
             total_requests,
-            format_count(total_prompt),
-            format_count(total_completion),
-            format_duration_short(total_duration)
+            total_prompt,
+            total_completion,
+            total_duration,
         ),
     ];
 
@@ -289,19 +298,18 @@ fn format_usage_report(day: NaiveDate, rows: &[DailyUsageRow]) -> String {
         let user_duration = entries.iter().map(|row| row.duration_ms).sum::<u64>();
 
         lines.push(String::new());
-        lines.push(format!(
-            "{}: {} req | {} prompt | {} completion | {}",
-            user,
+        lines.push(user.to_string());
+        lines.push(format_summary_line(
             user_requests,
-            format_count(user_prompt),
-            format_count(user_completion),
-            format_duration_short(user_duration)
+            user_prompt,
+            user_completion,
+            user_duration,
         ));
 
         for row in entries {
+            lines.push(format!("  {}", row.model));
             lines.push(format!(
-                "  - {} | {} req | {} / {} tok | {}",
-                row.model,
+                "  {} req | {} in | {} out | {}",
                 row.request_count,
                 format_count(row.prompt_tokens),
                 format_count(row.completion_tokens),
@@ -311,6 +319,21 @@ fn format_usage_report(day: NaiveDate, rows: &[DailyUsageRow]) -> String {
     }
 
     lines.join("\n")
+}
+
+fn format_summary_line(
+    request_count: u64,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    duration_ms: u64,
+) -> String {
+    format!(
+        "{} req | {} in | {} out | {}",
+        request_count,
+        format_count(prompt_tokens),
+        format_count(completion_tokens),
+        format_duration_short(duration_ms)
+    )
 }
 
 fn format_count(value: u64) -> String {
@@ -365,7 +388,10 @@ fn worker_phase_name(phase: WorkerPhase) -> &'static str {
 }
 
 fn unique_tag_count(tags: &[String]) -> usize {
-    tags.iter().map(String::as_str).collect::<HashSet<_>>().len()
+    tags.iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>()
+        .len()
 }
 
 #[derive(Deserialize)]
@@ -420,8 +446,9 @@ mod tests {
         );
 
         assert!(report.contains("Usage report for 2026-04-28"));
-        assert!(report.contains("Total: 2 req | 17 prompt | 5 completion"));
-        assert!(report.contains("alice: 2 req | 17 prompt | 5 completion"));
-        assert!(report.contains("  - bge-m3 | 2 req | 17 / 5 tok"));
+        assert!(report.contains("Overall"));
+        assert!(report.contains("2 req | 17 in | 5 out"));
+        assert!(report.contains("alice\n2 req | 17 in | 5 out"));
+        assert!(report.contains("  bge-m3\n  2 req | 17 in | 5 out"));
     }
 }
