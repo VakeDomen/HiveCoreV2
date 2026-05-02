@@ -11,8 +11,8 @@ use crate::servers::proxy::models::worker_http_response::WorkerHttpResponse;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
 use crate::servers::worker::models::worker_status::WorkerStatus;
 use crate::shared::http::{
-    read_request_from_reader, serialize_request, write_framed_request, HttpRequest, HttpResponse,
-    TokenUsage, UsageEvent,
+    read_request_from_reader, serialize_request, write_framed_request, HttpRequest, TokenUsage,
+    UsageEvent,
 };
 use crate::shared::log;
 
@@ -268,15 +268,20 @@ fn handle_poll(
     write_framed_request(writer, &bytes)
 }
 
-fn proxy_worker_response(
-    reader: &mut BufReader<TcpStream>,
-    client_stream: &mut TcpStream,
-) -> io::Result<(u16, Option<TokenUsage>)> {
+fn proxy_worker_response<R, W>(
+    reader: &mut R,
+    client_stream: &mut W,
+) -> io::Result<(u16, Option<TokenUsage>)>
+where
+    R: BufRead,
+    W: Write,
+{
     let mut status_line = String::new();
     reader.read_line(&mut status_line)?;
     if status_line.trim().is_empty() {
         log::warn("worker returned empty status line");
-        return reject_request(client_stream.try_clone()?, 502, "Bad Gateway").map(|sc| (sc, None));
+        write_empty_response(client_stream, 502, "Bad Gateway")?;
+        return Ok((502, None));
     }
 
     let mut headers = Vec::new();
@@ -284,7 +289,12 @@ fn proxy_worker_response(
     let mut chunked = false;
     loop {
         let mut line = String::new();
-        reader.read_line(&mut line)?;
+        if reader.read_line(&mut line)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "worker response ended before headers completed",
+            ));
+        }
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
             break;
@@ -295,7 +305,7 @@ fn proxy_worker_response(
             if lower == "content-length" {
                 content_length = value.parse::<usize>().ok();
             }
-            if lower == "transfer-encoding" && value.eq_ignore_ascii_case("chunked") {
+            if lower == "transfer-encoding" && transfer_encoding_is_chunked(&value) {
                 chunked = true;
             }
             headers.push((name.trim().to_string(), value));
@@ -303,43 +313,24 @@ fn proxy_worker_response(
     }
 
     client_stream.write_all(status_line.as_bytes())?;
-    for (name, value) in &headers {
+    for (name, value) in sanitize_response_headers(&headers, chunked) {
         client_stream.write_all(format!("{name}: {value}\r\n").as_bytes())?;
     }
     client_stream.write_all(b"\r\n")?;
 
-    let mut last_text: Option<String> = None;
-
-    if chunked {
-        loop {
-            let mut size_line = String::new();
-            reader.read_line(&mut size_line)?;
-            client_stream.write_all(size_line.as_bytes())?;
-            let size = usize::from_str_radix(size_line.trim(), 16).unwrap_or(0);
-            if size == 0 {
-                let mut trailing = [0_u8; 2];
-                reader.read_exact(&mut trailing)?;
-                client_stream.write_all(&trailing)?;
-                break;
-            }
-            let mut chunk = vec![0_u8; size + 2];
-            reader.read_exact(&mut chunk)?;
-            client_stream.write_all(&chunk)?;
-            // Save the text content of each chunk so we can parse the last one for usage
-            let payload: &[u8] = &chunk[..size];
-            last_text = Some(String::from_utf8_lossy(payload).to_string());
-        }
+    let last_text = if chunked {
+        relay_chunked_body(reader, client_stream)?
     } else if let Some(length) = content_length {
         let mut body = vec![0_u8; length];
         reader.read_exact(&mut body)?;
         client_stream.write_all(&body)?;
-        last_text = Some(String::from_utf8_lossy(&body).to_string());
+        Some(String::from_utf8_lossy(&body).to_string())
     } else {
         let mut body = Vec::new();
         reader.read_to_end(&mut body)?;
         client_stream.write_all(&body)?;
-        last_text = Some(String::from_utf8_lossy(&body).to_string());
-    }
+        Some(String::from_utf8_lossy(&body).to_string())
+    };
 
     client_stream.flush()?;
 
@@ -367,7 +358,12 @@ fn capture_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<Work
     let mut chunked = false;
     loop {
         let mut line = String::new();
-        reader.read_line(&mut line)?;
+        if reader.read_line(&mut line)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "worker response ended before headers completed",
+            ));
+        }
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
             break;
@@ -377,7 +373,7 @@ fn capture_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<Work
                 content_length = value.trim().parse::<usize>().ok();
             }
             if name.trim().eq_ignore_ascii_case("transfer-encoding")
-                && value.trim().eq_ignore_ascii_case("chunked")
+                && transfer_encoding_is_chunked(value.trim())
             {
                 chunked = true;
             }
@@ -388,11 +384,15 @@ fn capture_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<Work
     if chunked {
         loop {
             let mut size_line = String::new();
-            reader.read_line(&mut size_line)?;
-            let size = usize::from_str_radix(size_line.trim(), 16).unwrap_or(0);
+            if reader.read_line(&mut size_line)? == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "worker response ended before chunk size",
+                ));
+            }
+            let size = parse_chunk_size(&size_line)?;
             if size == 0 {
-                let mut trailing = [0_u8; 2];
-                reader.read_exact(&mut trailing)?;
+                discard_chunk_trailers(reader)?;
                 break;
             }
             let mut chunk = vec![0_u8; size];
@@ -411,6 +411,129 @@ fn capture_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<Work
         status_code: parse_status_code(&status_line),
         body,
     })
+}
+
+fn sanitize_response_headers(headers: &[(String, String)], chunked: bool) -> Vec<(String, String)> {
+    let mut sanitized = Vec::with_capacity(headers.len());
+    let mut transfer_encoding = None;
+
+    for (name, value) in headers {
+        if chunked && name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        if chunked && name.eq_ignore_ascii_case("transfer-encoding") {
+            if transfer_encoding.is_none() {
+                transfer_encoding = Some(value.clone());
+            }
+            continue;
+        }
+        sanitized.push((name.clone(), value.clone()));
+    }
+
+    if chunked {
+        sanitized.push((
+            "Transfer-Encoding".to_string(),
+            transfer_encoding.unwrap_or_else(|| "chunked".to_string()),
+        ));
+    }
+
+    sanitized
+}
+
+fn transfer_encoding_is_chunked(value: &str) -> bool {
+    value
+        .split(',')
+        .any(|part| part.trim().eq_ignore_ascii_case("chunked"))
+}
+
+fn relay_chunked_body<R, W>(reader: &mut R, client_stream: &mut W) -> io::Result<Option<String>>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut last_text = None;
+
+    loop {
+        let mut size_line = String::new();
+        if reader.read_line(&mut size_line)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "worker response ended before chunk size",
+            ));
+        }
+        client_stream.write_all(size_line.as_bytes())?;
+
+        let size = parse_chunk_size(&size_line)?;
+        if size == 0 {
+            relay_chunk_trailers(reader, client_stream)?;
+            break;
+        }
+
+        let mut chunk = vec![0_u8; size];
+        reader.read_exact(&mut chunk)?;
+        client_stream.write_all(&chunk)?;
+
+        let mut crlf = [0_u8; 2];
+        reader.read_exact(&mut crlf)?;
+        client_stream.write_all(&crlf)?;
+
+        last_text = Some(String::from_utf8_lossy(&chunk).to_string());
+    }
+
+    Ok(last_text)
+}
+
+fn parse_chunk_size(size_line: &str) -> io::Result<usize> {
+    let token = size_line.trim_end().split(';').next().unwrap_or("").trim();
+
+    if token.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "empty chunk size",
+        ));
+    }
+
+    usize::from_str_radix(token, 16).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid chunk size '{token}': {err}"),
+        )
+    })
+}
+
+fn relay_chunk_trailers<R, W>(reader: &mut R, client_stream: &mut W) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write,
+{
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "worker response ended before chunk trailers completed",
+            ));
+        }
+        client_stream.write_all(line.as_bytes())?;
+        if line.trim_end().is_empty() {
+            return Ok(());
+        }
+    }
+}
+
+fn discard_chunk_trailers(reader: &mut BufReader<TcpStream>) -> io::Result<()> {
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "worker response ended before chunk trailers completed",
+            ));
+        }
+        if line.trim_end().is_empty() {
+            return Ok(());
+        }
+    }
 }
 
 fn touch_worker(
@@ -438,9 +561,16 @@ fn remove_worker(state: &Arc<AppState>, worker_name: &str) {
     }
 }
 
-fn reject_request(mut stream: TcpStream, status: u16, reason: &'static str) -> io::Result<u16> {
-    HttpResponse::new(status, reason, Vec::new()).write_to(&mut stream)?;
-    Ok(status)
+fn write_empty_response<W: Write>(
+    stream: &mut W,
+    status: u16,
+    reason: &'static str,
+) -> io::Result<()> {
+    write!(stream, "HTTP/1.1 {status} {reason}\r\n")?;
+    write!(stream, "Content-Length: 0\r\n")?;
+    write!(stream, "Connection: close\r\n")?;
+    write!(stream, "\r\n")?;
+    stream.flush()
 }
 
 fn parse_status_code(status_line: &str) -> u16 {
@@ -450,4 +580,42 @@ fn parse_status_code(status_line: &str) -> u16 {
         .nth(1)
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(500)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, BufReader};
+
+    use super::{parse_chunk_size, proxy_worker_response};
+
+    #[test]
+    fn proxy_worker_response_removes_content_length_from_chunked_response() -> io::Result<()> {
+        let worker_response = b"HTTP/1.1 200 OK\r\n\
+                                Content-Type: application/json\r\n\
+                                Content-Length: 16\r\n\
+                                Transfer-Encoding: chunked\r\n\
+                                Connection: close\r\n\
+                                \r\n\
+                                10\r\n\
+                                {\"message\":\"ok\"}\r\n\
+                                0\r\n\
+                                \r\n";
+        let mut reader = BufReader::new(&worker_response[..]);
+        let mut relayed = Vec::new();
+
+        let (status_code, _) = proxy_worker_response(&mut reader, &mut relayed)?;
+        let relayed = String::from_utf8(relayed).expect("relayed response should be utf8");
+
+        assert_eq!(status_code, 200);
+        assert!(relayed.contains("Transfer-Encoding: chunked\r\n"));
+        assert!(!relayed.to_ascii_lowercase().contains("content-length:"));
+        assert!(relayed.ends_with("0\r\n\r\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_chunk_size_accepts_extensions() -> io::Result<()> {
+        assert_eq!(parse_chunk_size("a;foo=bar\r\n")?, 10);
+        Ok(())
+    }
 }
