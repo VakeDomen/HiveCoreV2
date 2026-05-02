@@ -7,11 +7,11 @@ use std::time::Instant;
 use crate::app::AppState;
 use crate::servers::proxy::admission::authorize_request;
 use crate::servers::proxy::admission::authorized_key;
-use crate::servers::proxy::models::client_task::ClientTask;
+use crate::servers::proxy::models::client_task::{ClientTask, RequestContext};
 use crate::servers::proxy::models::response_target::ResponseTarget;
 use crate::servers::proxy::models::route_plan::RoutePlan;
 use crate::servers::proxy::planner::plan_request;
-use crate::shared::http::{HttpRequest, HttpResponse, read_request};
+use crate::shared::http::{HttpRequest, HttpResponse, read_request, request_model_name};
 use crate::shared::log;
 
 pub fn run(state: Arc<AppState>) -> io::Result<()> {
@@ -64,15 +64,16 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
     let visible_key = authorized_key(&state, &request);
     let user_name = visible_key
         .as_ref()
-        .map(|k| k.name.clone())
-        .unwrap_or_else(|| String::from("Unauthenticated"));
+        .map(|key| key.name.as_str())
+        .unwrap_or("Unauthenticated");
 
     match plan_request(&state, &request, visible_key.as_ref()) {
         RoutePlan::Local(response) => {
             let status_code = response.status_code;
             response.write_to(&mut stream)?;
             log::info(format!(
-                "served local request method={} uri={} status={} total={}",
+                "served local request user={} method={} uri={} status={} total={}",
+                log::bold(user_name),
                 request_method,
                 request_uri,
                 log::bold(status_code.to_string()),
@@ -86,7 +87,8 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
             message,
         } => {
             log::warn(format!(
-                "rejected client request method={} uri={} status={} total={} reason={}",
+                "rejected client request user={} method={} uri={} status={} total={} reason={}",
+                log::bold(user_name),
                 request_method,
                 request_uri,
                 log::bold(status.to_string()),
@@ -95,13 +97,27 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
             ));
             HttpResponse::new(status, reason, message.as_bytes().to_vec()).write_to(&mut stream)
         }
-       RoutePlan::QueueByModel(model) => {
-           let task = client_task(request, &stream, user_name, Some(model.clone()))?;
-           enqueue_model(&state, model, task, &request_method, &request_uri, &mut stream)
+        RoutePlan::QueueByModel(model) => {
+            let task = client_task(
+                request,
+                &stream,
+                RequestContext {
+                    key_name: visible_key.as_ref().map(|key| key.name.clone()),
+                    model: Some(model.clone()),
+                },
+            )?;
+            enqueue_model(&state, model, task, &request_method, &request_uri, &mut stream)
         }
         RoutePlan::QueueByNode(worker) => {
-            let model = crate::shared::http::extract_json_value(&request.body, "model");
-            let task = client_task(request, &stream, user_name, model)?;
+            let model = request_model_name(&request);
+            let task = client_task(
+                request,
+                &stream,
+                RequestContext {
+                    key_name: visible_key.as_ref().map(|key| key.name.clone()),
+                    model,
+                },
+            )?;
             enqueue_node(&state, worker, task, &request_method, &request_uri, &mut stream)
         }
     }
@@ -110,15 +126,9 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
 fn client_task(
     request: HttpRequest,
     stream: &TcpStream,
-    user_name: String,
-    model: Option<String>,
+    context: RequestContext,
 ) -> io::Result<ClientTask> {
-    Ok(ClientTask::new(
-        request,
-        ResponseTarget::ProxyClient(stream.try_clone()?),
-        Some(user_name),
-        model,
-    ))
+    Ok(ClientTask::new(request, ResponseTarget::ProxyClient(stream.try_clone()?), context))
 }
 
 fn enqueue_model(
@@ -220,6 +230,34 @@ mod tests {
         let request = request_with_auth(None, br#"{"model":"llama3"}"#);
 
         assert_eq!(authorize_request(&state, &request), Err(401));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_request_with_api_key_header() -> io::Result<()> {
+        let (state, db_path) = test_state("api_key_auth", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Client,
+            "foras".to_string(),
+            vec!["llama3".to_string()],
+            Vec::new(),
+        )?;
+
+        let mut headers = HashMap::new();
+        headers.insert("api-key".to_string(), token);
+        let request = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/api/generate".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers,
+            body: br#"{"model":"llama3"}"#.to_vec(),
+        };
+
+        assert_eq!(authorize_request(&state, &request), Ok(()));
 
         cleanup(&db_path);
         Ok(())

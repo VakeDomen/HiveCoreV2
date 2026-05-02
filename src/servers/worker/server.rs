@@ -11,8 +11,8 @@ use crate::servers::proxy::models::worker_http_response::WorkerHttpResponse;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
 use crate::servers::worker::models::worker_status::WorkerStatus;
 use crate::shared::http::{
-    read_request_from_reader, serialize_request, write_framed_request, HttpRequest, TokenUsage,
-    UsageEvent,
+    HttpRequest, TokenUsage, UsageEvent, read_request_from_reader, serialize_request,
+    write_framed_request,
 };
 use crate::shared::log;
 
@@ -48,7 +48,10 @@ fn handle_connection(state: Arc<AppState>, stream: TcpStream) -> io::Result<()> 
 
     let auth_request = read_request_from_reader(&mut reader)?;
     let worker_name = authenticate_worker(&state, &mut writer, &auth_request)?;
-    log::success(format!("worker authenticated name={}", log::bold(&worker_name)));
+    log::success(format!(
+        "worker authenticated name={}",
+        log::bold(&worker_name)
+    ));
 
     loop {
         let request = match read_request_from_reader(&mut reader) {
@@ -190,7 +193,11 @@ fn handle_poll(
         let request_method = task.request.method.clone();
         let request_uri = task.request.uri.clone();
         let queue_wait = task.queue_wait();
-        let user_name = task.user_name.as_deref().unwrap_or("Unauthenticated");
+        let user_name = task
+            .context
+            .key_name
+            .as_deref()
+            .unwrap_or("Unauthenticated");
         let started_at = Instant::now();
         let bytes = serialize_request(&task.request);
         log::info(format!(
@@ -219,10 +226,19 @@ fn handle_poll(
 
         let worker_time = started_at.elapsed();
 
-        // Fire-and-forget usage event when token counts are available
-        if let Some(tu) = token_usage {
-            let model = task.model.clone().unwrap_or_default();
-            let key_name: String = task.user_name.clone().unwrap_or_else(|| "Unauthenticated".to_string());
+        // Record every successful request. Token counts may be unavailable on some streamed
+        // OpenAI-compatible responses, in which case we still count the request with zero usage.
+        if status_code < 400 && task.context.model.is_some() {
+            let tu = token_usage.unwrap_or(TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+            });
+            let model = task.context.model.clone().unwrap_or_default();
+            let key_name = task
+                .context
+                .key_name
+                .clone()
+                .unwrap_or_else(|| "Unauthenticated".to_string());
             let duration_ms = worker_time.as_millis() as u64;
             let created_at = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -318,25 +334,24 @@ where
     }
     client_stream.write_all(b"\r\n")?;
 
-    let last_text = if chunked {
+    let observed_usage = if chunked {
         relay_chunked_body(reader, client_stream)?
     } else if let Some(length) = content_length {
         let mut body = vec![0_u8; length];
         reader.read_exact(&mut body)?;
         client_stream.write_all(&body)?;
-        Some(String::from_utf8_lossy(&body).to_string())
+        crate::shared::http::parse_usage_json(&String::from_utf8_lossy(&body))
     } else {
         let mut body = Vec::new();
         reader.read_to_end(&mut body)?;
         client_stream.write_all(&body)?;
-        Some(String::from_utf8_lossy(&body).to_string())
+        crate::shared::http::parse_usage_json(&String::from_utf8_lossy(&body))
     };
 
     client_stream.flush()?;
 
     let status_code = parse_status_code(&status_line);
-    let token_usage = last_text.and_then(|text| crate::shared::http::parse_usage_json(&text));
-    Ok((status_code, token_usage))
+    Ok((status_code, observed_usage))
 }
 
 fn discard_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<u16> {
@@ -446,12 +461,12 @@ fn transfer_encoding_is_chunked(value: &str) -> bool {
         .any(|part| part.trim().eq_ignore_ascii_case("chunked"))
 }
 
-fn relay_chunked_body<R, W>(reader: &mut R, client_stream: &mut W) -> io::Result<Option<String>>
+fn relay_chunked_body<R, W>(reader: &mut R, client_stream: &mut W) -> io::Result<Option<TokenUsage>>
 where
     R: BufRead,
     W: Write,
 {
-    let mut last_text = None;
+    let mut observed_usage = None;
 
     loop {
         let mut size_line = String::new();
@@ -477,10 +492,13 @@ where
         reader.read_exact(&mut crlf)?;
         client_stream.write_all(&crlf)?;
 
-        last_text = Some(String::from_utf8_lossy(&chunk).to_string());
+        let chunk_text = String::from_utf8_lossy(&chunk);
+        if let Some(usage) = crate::shared::http::parse_usage_json(chunk_text.as_ref()) {
+            observed_usage = Some(usage);
+        }
     }
 
-    Ok(last_text)
+    Ok(observed_usage)
 }
 
 fn parse_chunk_size(size_line: &str) -> io::Result<usize> {
@@ -586,6 +604,8 @@ fn parse_status_code(status_line: &str) -> u16 {
 mod tests {
     use std::io::{self, BufReader};
 
+    use crate::shared::http::TokenUsage;
+
     use super::{parse_chunk_size, proxy_worker_response};
 
     #[test]
@@ -610,6 +630,36 @@ mod tests {
         assert!(relayed.contains("Transfer-Encoding: chunked\r\n"));
         assert!(!relayed.to_ascii_lowercase().contains("content-length:"));
         assert!(relayed.ends_with("0\r\n\r\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_worker_response_observes_usage_from_chunked_response() -> io::Result<()> {
+        let usage_payload = r#"data: {"usage":{"prompt_tokens":9,"completion_tokens":4}}"#;
+        let worker_response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Transfer-Encoding: chunked\r\n\
+             \r\n\
+             {:x}\r\n\
+             {}\r\n\
+             0\r\n\
+             \r\n",
+            usage_payload.len(),
+            usage_payload
+        );
+        let mut reader = BufReader::new(worker_response.as_bytes());
+        let mut relayed = Vec::new();
+
+        let (status_code, usage) = proxy_worker_response(&mut reader, &mut relayed)?;
+
+        assert_eq!(status_code, 200);
+        assert_eq!(
+            usage,
+            Some(TokenUsage {
+                prompt_tokens: 9,
+                completion_tokens: 4,
+            })
+        );
         Ok(())
     }
 

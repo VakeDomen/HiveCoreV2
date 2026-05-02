@@ -8,12 +8,14 @@ pub use models::http_request::HttpRequest;
 pub use models::http_response::HttpResponse;
 
 /// Token counts extracted from an LLM response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TokenUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
 }
 
 /// Usage event sent to the stats worker via the mpsc channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UsageEvent {
     pub key_name: String,
     pub model: String,
@@ -27,7 +29,49 @@ pub struct UsageEvent {
 /// Supports both OpenAI format (`usage.prompt_tokens`, `usage.completion_tokens`)
 /// and Ollama format (`prompt_eval_count`, `eval_count`).
 pub fn parse_usage_json(text: &str) -> Option<TokenUsage> {
-    let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
+    if let Some(usage) = parse_usage_value(text) {
+        return Some(usage);
+    }
+
+    for line in text.lines().rev() {
+        if let Some(usage) = parse_usage_value(line) {
+            return Some(usage);
+        }
+    }
+
+    None
+}
+
+pub fn request_model_name(request: &HttpRequest) -> Option<String> {
+    match (request.method.as_str(), request.uri.as_str()) {
+        ("POST", "/api/generate")
+        | ("POST", "/api/chat")
+        | ("POST", "/api/embed")
+        | ("POST", "/api/embeddings")
+        | ("POST", "/api/show")
+        | ("POST", "/api/pull")
+        | ("POST", "/api/push")
+        | ("DELETE", "/api/delete") => extract_json_value(&request.body, "model"),
+        ("POST", "/api/copy") => extract_json_value(&request.body, "source"),
+        ("POST", "/api/create") => extract_json_value(&request.body, "from"),
+        _ => None,
+    }
+}
+
+fn parse_usage_value(text: &str) -> Option<TokenUsage> {
+    let candidate = text.trim();
+    if candidate.is_empty() || candidate == "[DONE]" {
+        return None;
+    }
+    let candidate = candidate
+        .strip_prefix("data:")
+        .map(str::trim)
+        .unwrap_or(candidate);
+    if candidate.is_empty() || candidate == "[DONE]" {
+        return None;
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(candidate).ok()?;
 
     // Try OpenAI format first
     if let Some(usage) = parsed.get("usage") {
@@ -174,4 +218,46 @@ pub fn extract_json_value(body: &[u8], field: &str) -> Option<String> {
     let rest = &value_part[1..];
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HttpRequest, TokenUsage, parse_usage_json, request_model_name};
+
+    #[test]
+    fn parses_ollama_usage_from_raw_json() {
+        assert_eq!(
+            parse_usage_json(r#"{"prompt_eval_count":12,"eval_count":34}"#),
+            Some(TokenUsage {
+                prompt_tokens: 12,
+                completion_tokens: 34,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_openai_usage_from_stream_frame() {
+        assert_eq!(
+            parse_usage_json(
+                "data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4}}\n\ndata: [DONE]\n"
+            ),
+            Some(TokenUsage {
+                prompt_tokens: 9,
+                completion_tokens: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn resolves_request_model_name_for_supported_routes() {
+        let request = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/api/copy".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers: Default::default(),
+            body: br#"{"source":"base-model","destination":"copy"}"#.to_vec(),
+        };
+
+        assert_eq!(request_model_name(&request).as_deref(), Some("base-model"));
+    }
 }
