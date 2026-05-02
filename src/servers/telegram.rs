@@ -119,6 +119,7 @@ impl TelegramClient {
             .json(&json!({
                 "chat_id": user_id,
                 "text": text,
+                "parse_mode": "HTML",
             }))
             .send()
             .map_err(io::Error::other)?;
@@ -275,10 +276,10 @@ fn format_usage_report(day: NaiveDate, rows: &[DailyUsageRow]) -> String {
     let total_duration = rows.iter().map(|row| row.duration_ms).sum::<u64>();
 
     let mut lines = vec![
-        format!("Usage report for {}", day.format("%Y-%m-%d")),
+        format!("<b>Usage report for {}</b>", day.format("%Y-%m-%d")),
         String::new(),
-        "Overall".to_string(),
-        format_summary_line(
+        "<b>📊 Overall</b>".to_string(),
+        format_summary_block(
             total_requests,
             total_prompt,
             total_completion,
@@ -298,18 +299,19 @@ fn format_usage_report(day: NaiveDate, rows: &[DailyUsageRow]) -> String {
         let user_duration = entries.iter().map(|row| row.duration_ms).sum::<u64>();
 
         lines.push(String::new());
-        lines.push(user.to_string());
-        lines.push(format_summary_line(
+        lines.push(format_user_heading(user));
+        lines.push(format_summary_block(
             user_requests,
             user_prompt,
             user_completion,
             user_duration,
         ));
+        lines.push("  Models:".to_string());
 
         for row in entries {
-            lines.push(format!("  {}", row.model));
+            lines.push(format!("  • <code>{}</code>", escape_html(&row.model)));
             lines.push(format!(
-                "  {} req | {} in | {} out | {}",
+                "    {} req | {} in | {} out | {}",
                 row.request_count,
                 format_count(row.prompt_tokens),
                 format_count(row.completion_tokens),
@@ -321,19 +323,33 @@ fn format_usage_report(day: NaiveDate, rows: &[DailyUsageRow]) -> String {
     lines.join("\n")
 }
 
-fn format_summary_line(
+fn format_summary_block(
     request_count: u64,
     prompt_tokens: u64,
     completion_tokens: u64,
     duration_ms: u64,
 ) -> String {
-    format!(
-        "{} req | {} in | {} out | {}",
-        request_count,
-        format_count(prompt_tokens),
-        format_count(completion_tokens),
-        format_duration_short(duration_ms)
-    )
+    [
+        format!("  Requests: {}", request_count),
+        format!("  Input:    {}", format_count(prompt_tokens)),
+        format!("  Output:   {}", format_count(completion_tokens)),
+        format!("  Time:     {}", format_duration_short(duration_ms)),
+    ]
+    .join("\n")
+}
+
+fn format_user_heading(user: &str) -> String {
+    if user == "Unauthenticated" {
+        "<b>🔓 Unauthenticated</b>".to_string()
+    } else {
+        format!("<b>👤 {}</b>", escape_html(user))
+    }
+}
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn format_count(value: u64) -> String {
@@ -446,9 +462,11 @@ mod tests {
         );
 
         assert!(report.contains("Usage report for 2026-04-28"));
-        assert!(report.contains("Overall"));
-        assert!(report.contains("2 req | 17 in | 5 out"));
-        assert!(report.contains("alice\n2 req | 17 in | 5 out"));
-        assert!(report.contains("  bge-m3\n  2 req | 17 in | 5 out"));
+        assert!(report.contains("📊 Overall"));
+        assert!(report.contains("  Requests: 2"));
+        assert!(report.contains("👤 alice"));
+        assert!(report.contains("  Models:"));
+        assert!(report.contains("  • <code>bge-m3</code>"));
+        assert!(report.contains("    2 req | 17 in | 5 out"));
     }
 }

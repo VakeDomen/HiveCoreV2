@@ -236,6 +236,34 @@ mod tests {
     }
 
     #[test]
+    fn accepts_request_with_api_key_header() -> io::Result<()> {
+        let (state, db_path) = test_state("api_key_auth", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Client,
+            "foras".to_string(),
+            vec!["llama3".to_string()],
+            Vec::new(),
+        )?;
+
+        let mut headers = HashMap::new();
+        headers.insert("api-key".to_string(), token);
+        let request = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/api/generate".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers,
+            body: br#"{"model":"llama3"}"#.to_vec(),
+        };
+
+        assert_eq!(authorize_request(&state, &request), Ok(()));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
     fn accepts_request_when_whitelist_allows_model() -> io::Result<()> {
         let (state, db_path) = test_state("whitelist_ok", true)?;
         let token = Uuid::new_v4().to_string();

@@ -17,9 +17,15 @@ impl HttpRequest {
     }
 
     pub fn bearer_token(&self) -> Option<&str> {
-        let header = self.header("authorization")?;
-        header
-            .strip_prefix("Bearer ")
-            .or_else(|| header.strip_prefix("bearer "))
+        if let Some(header) = self.header("authorization") {
+            if let Some(token) = header
+                .strip_prefix("Bearer ")
+                .or_else(|| header.strip_prefix("bearer "))
+            {
+                return Some(token);
+            }
+        }
+
+        self.header("api-key")
     }
 }

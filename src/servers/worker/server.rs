@@ -219,8 +219,13 @@ fn handle_poll(
 
         let worker_time = started_at.elapsed();
 
-        // Fire-and-forget usage event when token counts are available
-        if let Some(tu) = token_usage {
+        // Record every successful request. Token counts may be unavailable on some streamed
+        // OpenAI-compatible responses, in which case we still count the request with zero usage.
+        if status_code < 400 && task.context.model.is_some() {
+            let tu = token_usage.unwrap_or(TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+            });
             let model = task.context.model.clone().unwrap_or_default();
             let key_name = task
                 .context
@@ -312,7 +317,7 @@ fn proxy_worker_response(
     }
     client_stream.write_all(b"\r\n")?;
 
-    let mut last_text: Option<String> = None;
+    let mut observed_usage = None;
 
     if chunked {
         loop {
@@ -329,27 +334,29 @@ fn proxy_worker_response(
             let mut chunk = vec![0_u8; size + 2];
             reader.read_exact(&mut chunk)?;
             client_stream.write_all(&chunk)?;
-            // Save the text content of each chunk so we can parse the last one for usage
             let payload: &[u8] = &chunk[..size];
-            last_text = Some(String::from_utf8_lossy(payload).to_string());
+            if let Some(usage) =
+                crate::shared::http::parse_usage_json(&String::from_utf8_lossy(payload))
+            {
+                observed_usage = Some(usage);
+            }
         }
     } else if let Some(length) = content_length {
         let mut body = vec![0_u8; length];
         reader.read_exact(&mut body)?;
         client_stream.write_all(&body)?;
-        last_text = Some(String::from_utf8_lossy(&body).to_string());
+        observed_usage = crate::shared::http::parse_usage_json(&String::from_utf8_lossy(&body));
     } else {
         let mut body = Vec::new();
         reader.read_to_end(&mut body)?;
         client_stream.write_all(&body)?;
-        last_text = Some(String::from_utf8_lossy(&body).to_string());
+        observed_usage = crate::shared::http::parse_usage_json(&String::from_utf8_lossy(&body));
     }
 
     client_stream.flush()?;
 
     let status_code = parse_status_code(&status_line);
-    let token_usage = last_text.and_then(|text| crate::shared::http::parse_usage_json(&text));
-    Ok((status_code, token_usage))
+    Ok((status_code, observed_usage))
 }
 
 fn discard_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<u16> {
