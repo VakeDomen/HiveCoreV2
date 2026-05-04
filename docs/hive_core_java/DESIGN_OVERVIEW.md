@@ -84,8 +84,7 @@ Authentication and authorization are also minimal:
 - worker auth requires a key with `Admin` or `Worker` role
 - management auth requires `Admin`
 - client auth is optional and gated only by `USER_AUTHENTICATION`
-
-One code-backed caveat: targeted proxy requests with a `node` header are not separately restricted to admin callers in the current implementation, even though the README describes that behavior.
+- targeted proxy requests with a `Node` header require `Admin`
 
 ## Key Design Constraints
 

@@ -260,6 +260,18 @@ mod tests {
         }
     }
 
+    fn request_with_auth_to(
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+        body: &[u8],
+    ) -> HttpRequest {
+        let mut request = request_with_auth(token, body);
+        request.method = method.to_string();
+        request.uri = uri.to_string();
+        request
+    }
+
     fn cleanup(path: &PathBuf) {
         let _ = fs::remove_file(path);
     }
@@ -268,6 +280,17 @@ mod tests {
     fn rejects_missing_client_credentials_when_auth_is_enabled() -> io::Result<()> {
         let (state, db_path) = test_state("missing_auth", true)?;
         let request = request_with_auth(None, br#"{"model":"llama3"}"#);
+
+        assert_eq!(authorize_request(&state, &request), Err(401));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_local_proxy_route_without_auth_when_auth_is_enabled() -> io::Result<()> {
+        let (state, db_path) = test_state("local_missing_auth", true)?;
+        let request = request_with_auth_to("GET", "/api/tags", None, b"");
 
         assert_eq!(authorize_request(&state, &request), Err(401));
 
@@ -374,6 +397,74 @@ mod tests {
         let request = request_with_auth(Some(&token), br#"{"model":"mistral"}"#);
 
         assert_eq!(authorize_request(&state, &request), Err(403));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_openai_request_when_model_not_in_whitelist() -> io::Result<()> {
+        let (state, db_path) = test_state("openai_whitelist_reject", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            vec!["llama3".to_string()],
+            Vec::new(),
+        )?;
+        let request = request_with_auth_to(
+            "POST",
+            "/v1/chat/completions",
+            Some(&token),
+            br#"{"model":"mistral","messages":[]}"#,
+        );
+
+        assert_eq!(authorize_request(&state, &request), Err(403));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_node_targeted_request_for_client_key() -> io::Result<()> {
+        let (state, db_path) = test_state("node_client_reject", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            vec!["llama3".to_string()],
+            Vec::new(),
+        )?;
+        let mut request = request_with_auth(Some(&token), br#"{"model":"llama3"}"#);
+        request
+            .headers
+            .insert("node".to_string(), "worker-a".to_string());
+
+        assert_eq!(authorize_request(&state, &request), Err(403));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_node_targeted_request_for_admin_key() -> io::Result<()> {
+        let (state, db_path) = test_state("node_admin_ok", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Admin,
+            "root".to_string(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut request = request_with_auth(Some(&token), br#"{"model":"llama3"}"#);
+        request
+            .headers
+            .insert("node".to_string(), "worker-a".to_string());
+
+        assert_eq!(authorize_request(&state, &request), Ok(()));
 
         cleanup(&db_path);
         Ok(())

@@ -1,6 +1,6 @@
 use crate::app::AppState;
 use crate::auth::{KeyRecord, Role};
-use crate::shared::http::{HttpRequest, extract_json_value};
+use crate::shared::http::{extract_json_value, HttpRequest};
 use crate::shared::log;
 
 pub fn authorize_request(state: &AppState, request: &HttpRequest) -> Result<(), u16> {
@@ -12,6 +12,23 @@ pub fn authorize_request(state: &AppState, request: &HttpRequest) -> Result<(), 
             request.method, request.uri
         ));
         return Err(401);
+    }
+
+    if request.header("node").is_some() {
+        let Some(key) = verified_key.as_ref() else {
+            log::warn(format!(
+                "rejected node-targeted request without admin key method={} uri={}",
+                request.method, request.uri
+            ));
+            return Err(401);
+        };
+        if key.role != Role::Admin {
+            log::warn(format!(
+                "rejected node-targeted request for non-admin key={} method={} uri={}",
+                key.name, request.method, request.uri
+            ));
+            return Err(403);
+        }
     }
 
     if let Some(key) = verified_key.as_ref() {
@@ -42,6 +59,9 @@ fn request_models(request: &HttpRequest) -> Vec<String> {
         | ("POST", "/api/chat")
         | ("POST", "/api/embed")
         | ("POST", "/api/embeddings")
+        | ("POST", "/v1/chat/completions")
+        | ("POST", "/v1/completions")
+        | ("POST", "/v1/embeddings")
         | ("POST", "/api/show")
         | ("POST", "/api/pull")
         | ("POST", "/api/push")

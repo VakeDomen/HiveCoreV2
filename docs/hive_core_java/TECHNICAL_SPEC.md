@@ -483,7 +483,3 @@ Current code does not implement:
 - request cancellation propagation
 - graceful coordinated shutdown
 - cache eviction for key lookups
-
-Also note a code/README mismatch:
-
-- The README says targeted client requests require admin authorization, but `RequestQue.addTask()` only checks for the presence of the `node` header. No separate admin-only gate exists on the proxy path as implemented today.

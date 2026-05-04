@@ -117,7 +117,7 @@ If enabled, inbound client requests must include:
 Authorization: Bearer <token>
 ```
 
-Accepted roles are `Admin` or `Client`. There is no extra proxy-path check for node-targeted requests beyond this general client auth gate.
+Accepted roles are `Admin` or `Client`. Requests with a `Node` header require an `Admin` key because they bypass normal model-based worker selection.
 
 ### Management Authentication
 
