@@ -11,7 +11,9 @@ use crate::servers::proxy::models::client_task::{ClientTask, RequestContext};
 use crate::servers::proxy::models::response_target::ResponseTarget;
 use crate::servers::proxy::models::route_plan::RoutePlan;
 use crate::servers::proxy::planner::plan_request;
-use crate::shared::http::{HttpRequest, HttpResponse, read_request, request_model_name};
+use crate::shared::http::{
+    ensure_openai_stream_usage, read_request, request_usage_model_name, HttpRequest, HttpResponse,
+};
 use crate::shared::log;
 
 pub fn run(state: Arc<AppState>) -> io::Result<()> {
@@ -98,6 +100,16 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
             HttpResponse::new(status, reason, message.as_bytes().to_vec()).write_to(&mut stream)
         }
         RoutePlan::QueueByModel(model) => {
+            let mut request = request;
+            if ensure_openai_stream_usage(&mut request) {
+                log::info(format!(
+                    "enabled usage metadata for streaming OpenAI-compatible request user={} method={} uri={} model={}",
+                    log::bold(user_name),
+                    request_method,
+                    request_uri,
+                    log::bold(&model)
+                ));
+            }
             let task = client_task(
                 request,
                 &stream,
@@ -106,10 +118,27 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
                     model: Some(model.clone()),
                 },
             )?;
-            enqueue_model(&state, model, task, &request_method, &request_uri, &mut stream)
+            enqueue_model(
+                &state,
+                model,
+                task,
+                &request_method,
+                &request_uri,
+                &mut stream,
+            )
         }
         RoutePlan::QueueByNode(worker) => {
-            let model = request_model_name(&request);
+            let mut request = request;
+            let model = request_usage_model_name(&request);
+            if ensure_openai_stream_usage(&mut request) {
+                log::info(format!(
+                    "enabled usage metadata for streaming OpenAI-compatible node request user={} method={} uri={} worker={}",
+                    log::bold(user_name),
+                    request_method,
+                    request_uri,
+                    log::bold(&worker)
+                ));
+            }
             let task = client_task(
                 request,
                 &stream,
@@ -118,7 +147,14 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
                     model,
                 },
             )?;
-            enqueue_node(&state, worker, task, &request_method, &request_uri, &mut stream)
+            enqueue_node(
+                &state,
+                worker,
+                task,
+                &request_method,
+                &request_uri,
+                &mut stream,
+            )
         }
     }
 }
@@ -128,7 +164,11 @@ fn client_task(
     stream: &TcpStream,
     context: RequestContext,
 ) -> io::Result<ClientTask> {
-    Ok(ClientTask::new(request, ResponseTarget::ProxyClient(stream.try_clone()?), context))
+    Ok(ClientTask::new(
+        request,
+        ResponseTarget::ProxyClient(stream.try_clone()?),
+        context,
+    ))
 }
 
 fn enqueue_model(

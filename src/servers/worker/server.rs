@@ -11,8 +11,8 @@ use crate::servers::proxy::models::worker_http_response::WorkerHttpResponse;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
 use crate::servers::worker::models::worker_status::WorkerStatus;
 use crate::shared::http::{
-    HttpRequest, TokenUsage, UsageEvent, read_request_from_reader, serialize_request,
-    write_framed_request,
+    read_request_from_reader, serialize_request, write_framed_request, HttpRequest, TokenUsage,
+    UsageEvent,
 };
 use crate::shared::log;
 
@@ -226,14 +226,25 @@ fn handle_poll(
 
         let worker_time = started_at.elapsed();
 
-        // Record every successful request. Token counts may be unavailable on some streamed
-        // OpenAI-compatible responses, in which case we still count the request with zero usage.
+        // Record successful inference requests. Some upstreams do not return usage metadata,
+        // so those requests are still counted with zero tokens.
         if status_code < 400 && task.context.model.is_some() {
+            let missing_usage = token_usage.is_none();
             let tu = token_usage.unwrap_or(TokenUsage {
                 prompt_tokens: 0,
                 completion_tokens: 0,
             });
             let model = task.context.model.clone().unwrap_or_default();
+            if missing_usage {
+                log::warn(format!(
+                    "usage metadata missing request id={} user={} model={} method={} uri={}",
+                    log::bold(request_id.to_string()),
+                    log::bold(user_name),
+                    log::bold(&model),
+                    request_method,
+                    request_uri
+                ));
+            }
             let key_name = task
                 .context
                 .key_name
@@ -466,7 +477,7 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut observed_usage = None;
+    let mut usage_scanner = UsageLineScanner::default();
 
     loop {
         let mut size_line = String::new();
@@ -492,13 +503,43 @@ where
         reader.read_exact(&mut crlf)?;
         client_stream.write_all(&crlf)?;
 
-        let chunk_text = String::from_utf8_lossy(&chunk);
-        if let Some(usage) = crate::shared::http::parse_usage_json(chunk_text.as_ref()) {
-            observed_usage = Some(usage);
+        usage_scanner.push(&chunk);
+    }
+
+    Ok(usage_scanner.finish())
+}
+
+#[derive(Default)]
+struct UsageLineScanner {
+    pending: Vec<u8>,
+    observed: Option<TokenUsage>,
+}
+
+impl UsageLineScanner {
+    fn push(&mut self, bytes: &[u8]) {
+        self.observe(bytes);
+        self.pending.extend_from_slice(bytes);
+
+        while let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line = self.pending.drain(..=newline).collect::<Vec<_>>();
+            self.observe(&line);
         }
     }
 
-    Ok(observed_usage)
+    fn finish(mut self) -> Option<TokenUsage> {
+        if !self.pending.is_empty() {
+            let pending = std::mem::take(&mut self.pending);
+            self.observe(&pending);
+        }
+        self.observed
+    }
+
+    fn observe(&mut self, bytes: &[u8]) {
+        let text = String::from_utf8_lossy(bytes);
+        if let Some(usage) = crate::shared::http::parse_usage_json(text.as_ref()) {
+            self.observed = Some(usage);
+        }
+    }
 }
 
 fn parse_chunk_size(size_line: &str) -> io::Result<usize> {
@@ -658,6 +699,76 @@ mod tests {
             Some(TokenUsage {
                 prompt_tokens: 9,
                 completion_tokens: 4,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_worker_response_observes_usage_split_across_chunks() -> io::Result<()> {
+        let first = r#"data: {"usage":{"prompt"#;
+        let second = "_tokens\":9,\"completion_tokens\":4}}\n";
+        let worker_response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Transfer-Encoding: chunked\r\n\
+             \r\n\
+             {:x}\r\n\
+             {}\r\n\
+             {:x}\r\n\
+             {}\r\n\
+             0\r\n\
+             \r\n",
+            first.len(),
+            first,
+            second.len(),
+            second
+        );
+        let mut reader = BufReader::new(worker_response.as_bytes());
+        let mut relayed = Vec::new();
+
+        let (status_code, usage) = proxy_worker_response(&mut reader, &mut relayed)?;
+
+        assert_eq!(status_code, 200);
+        assert_eq!(
+            usage,
+            Some(TokenUsage {
+                prompt_tokens: 9,
+                completion_tokens: 4,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_worker_response_observes_usage_after_non_newline_chunks() -> io::Result<()> {
+        let first = r#"{"message":"partial"}"#;
+        let usage_payload = r#"{"prompt_eval_count":11,"eval_count":3}"#;
+        let worker_response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Transfer-Encoding: chunked\r\n\
+             \r\n\
+             {:x}\r\n\
+             {}\r\n\
+             {:x}\r\n\
+             {}\r\n\
+             0\r\n\
+             \r\n",
+            first.len(),
+            first,
+            usage_payload.len(),
+            usage_payload
+        );
+        let mut reader = BufReader::new(worker_response.as_bytes());
+        let mut relayed = Vec::new();
+
+        let (status_code, usage) = proxy_worker_response(&mut reader, &mut relayed)?;
+
+        assert_eq!(status_code, 200);
+        assert_eq!(
+            usage,
+            Some(TokenUsage {
+                prompt_tokens: 11,
+                completion_tokens: 3,
             })
         );
         Ok(())
