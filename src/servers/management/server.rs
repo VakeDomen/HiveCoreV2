@@ -56,7 +56,10 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         ("GET", "/worker/versions") => routes::workers::get_versions(&state),
         ("GET", "/key") => routes::keys::get_keys(&state),
         ("POST", "/key") => routes::keys::post_key(&state, &request),
-        ("POST", "/worker/command") => routes::worker_command::post_worker_command(&state, &request),
+        ("PATCH", "/key") => routes::keys::patch_key(&state, &request),
+        ("POST", "/worker/command") => {
+            routes::worker_command::post_worker_command(&state, &request)
+        }
         _ => HttpResponse::new(404, "Not Found", Vec::new()),
     };
 

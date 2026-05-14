@@ -23,8 +23,13 @@ fn main() -> io::Result<()> {
         std::sync::mpsc::Sender<shared::http::UsageEvent>,
         std::sync::mpsc::Receiver<shared::http::UsageEvent>,
     ) = std::sync::mpsc::channel();
-    let state = Arc::new(AppState::new(config.clone(), stats_tx)?);
+    let (capture_tx, capture_rx): (
+        std::sync::mpsc::Sender<shared::capture::CaptureEvent>,
+        std::sync::mpsc::Receiver<shared::capture::CaptureEvent>,
+    ) = std::sync::mpsc::channel();
+    let state = Arc::new(AppState::new(config.clone(), stats_tx, capture_tx)?);
     let stats_database_url = config.database_url.clone();
+    let capture_dir = config.capture_dir.clone();
 
     let client_state = Arc::clone(&state);
     let worker_state = Arc::clone(&state);
@@ -33,15 +38,18 @@ fn main() -> io::Result<()> {
     let stats_thread = thread::spawn(move || {
         shared::sqlite::usage_tracking::run_usage_tracking_worker(stats_database_url, stats_rx)
     });
+    let capture_thread =
+        thread::spawn(move || shared::capture::run_capture_writer(capture_dir, capture_rx));
     let telegram_state = Arc::clone(&state);
     let telegram_enabled = config.telegram_bot_token.is_some() && config.telegram_user_id.is_some();
 
     let client_thread = thread::spawn(move || servers::proxy::server::run(client_state));
     let worker_thread = thread::spawn(move || servers::worker::server::run(worker_state));
-    let management_thread = thread::spawn(move || servers::management::server::run(management_state));
+    let management_thread =
+        thread::spawn(move || servers::management::server::run(management_state));
     let overseer_thread = thread::spawn(move || servers::worker::overseer::run(overseer_state));
-    let telegram_thread = telegram_enabled
-        .then(|| thread::spawn(move || servers::telegram::run(telegram_state)));
+    let telegram_thread =
+        telegram_enabled.then(|| thread::spawn(move || servers::telegram::run(telegram_state)));
 
     join_server("client", client_thread)?;
     join_server("worker", worker_thread)?;
@@ -51,6 +59,7 @@ fn main() -> io::Result<()> {
         join_server("telegram", handle)?;
     }
     join_server("stats", stats_thread)?;
+    join_server("capture", capture_thread)?;
 
     Ok(())
 }

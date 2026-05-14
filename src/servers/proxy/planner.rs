@@ -641,7 +641,8 @@ mod tests {
             ..Config::default()
         };
         let (stats_tx, _stats_rx) = std::sync::mpsc::channel();
-        Ok((AppState::new(config, stats_tx)?, db_path))
+        let (capture_tx, _capture_rx) = std::sync::mpsc::channel();
+        Ok((AppState::new(config, stats_tx, capture_tx)?, db_path))
     }
 
     fn worker_status(name: &str, tags: Vec<&str>) -> WorkerStatus {
@@ -764,6 +765,7 @@ mod tests {
             token,
             crate::auth::Role::Client,
             "alice".to_string(),
+            false,
             vec!["llama3".to_string()],
             Vec::new(),
         )?;
@@ -798,6 +800,7 @@ mod tests {
             token,
             crate::auth::Role::Client,
             "alice".to_string(),
+            false,
             vec!["bge-m3".to_string()],
             Vec::new(),
         )?;

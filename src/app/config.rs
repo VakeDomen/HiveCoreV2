@@ -78,6 +78,9 @@ impl Config {
                 ("Database", "DATABASE_URL") => {
                     config.database_url = normalize_database_url(value);
                 }
+                ("Capture", "CAPTURE_DIR") => {
+                    config.capture_dir = value.to_string();
+                }
                 ("Telegram", "BOT_TOKEN") => {
                     config.telegram_bot_token = normalize_optional_string(value);
                 }
@@ -93,7 +96,7 @@ impl Config {
 
     fn to_ini(&self) -> String {
         format!(
-            "[Server]\nUSER_AUTHENTICATION = {}\nPROXY_PORT = {}\nNODE_CONNECTION_PORT = {}\nMANAGEMENT_CONNECTION_PORT = {}\n\n[Connection]\nPOLLING_NODE_CONNECTION_TIMEOUT = {}\nWORKING_NODE_CONNECTION_TIMEOUT = {}\nPROXY_TIMEOUT_MS = {}\nMESSAGE_CHUNK_BUFFER_SIZE = {}\n\n[Database]\nDATABASE_URL = {}\n\n[Telegram]\nBOT_TOKEN = {}\nUSER_ID = {}\n",
+            "[Server]\nUSER_AUTHENTICATION = {}\nPROXY_PORT = {}\nNODE_CONNECTION_PORT = {}\nMANAGEMENT_CONNECTION_PORT = {}\n\n[Connection]\nPOLLING_NODE_CONNECTION_TIMEOUT = {}\nWORKING_NODE_CONNECTION_TIMEOUT = {}\nPROXY_TIMEOUT_MS = {}\nMESSAGE_CHUNK_BUFFER_SIZE = {}\n\n[Database]\nDATABASE_URL = {}\n\n[Capture]\nCAPTURE_DIR = {}\n\n[Telegram]\nBOT_TOKEN = {}\nUSER_ID = {}\n",
             self.user_authentication,
             self.proxy_port,
             self.node_connection_port,
@@ -103,8 +106,11 @@ impl Config {
             self.proxy_timeout_ms,
             self.message_chunk_buffer_size,
             self.database_url,
+            self.capture_dir,
             self.telegram_bot_token.as_deref().unwrap_or(""),
-            self.telegram_user_id.map(|value| value.to_string()).unwrap_or_default()
+            self.telegram_user_id
+                .map(|value| value.to_string())
+                .unwrap_or_default()
         )
     }
 }

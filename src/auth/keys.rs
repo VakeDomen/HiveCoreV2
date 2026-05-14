@@ -51,12 +51,18 @@ impl KeyStore {
         token: String,
         role: Role,
         name: String,
+        capture: bool,
         whitelist_models: Vec<String>,
         blacklist_models: Vec<String>,
     ) -> io::Result<KeyRecord> {
-        let record = self
-            .database
-            .insert_key(token, role, name, whitelist_models, blacklist_models)?;
+        let record = self.database.insert_key(
+            token,
+            role,
+            name,
+            capture,
+            whitelist_models,
+            blacklist_models,
+        )?;
         if let Ok(mut guard) = self.cache.write() {
             guard.insert(record.token.clone(), record.clone());
         }
@@ -65,6 +71,12 @@ impl KeyStore {
 
     pub fn list(&self) -> io::Result<Vec<KeyRecord>> {
         self.database.list_keys()
+    }
+
+    pub fn update_capture(&self, id: i64, capture: bool) -> io::Result<Option<KeyRecord>> {
+        let record = self.database.update_key_capture(id, capture)?;
+        self.refresh_cache()?;
+        Ok(record)
     }
 
     fn refresh_cache(&self) -> io::Result<()> {
@@ -192,7 +204,11 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO keys (name, value, role) VALUES (?1, ?2, ?3)",
-                    params!["legacy-admin", Uuid::new_v4().to_string(), Role::Admin.as_str()],
+                    params![
+                        "legacy-admin",
+                        Uuid::new_v4().to_string(),
+                        Role::Admin.as_str()
+                    ],
                 )
                 .map_err(io::Error::other)?;
         }
@@ -202,6 +218,7 @@ mod tests {
             Uuid::new_v4().to_string(),
             Role::Client,
             "alice".to_string(),
+            false,
             vec!["qwen3:0.6b".to_string()],
             vec!["hidden-model".to_string()],
         )?;
@@ -232,12 +249,14 @@ mod tests {
             token.clone(),
             Role::Worker,
             "worker-a".to_string(),
+            true,
             vec!["llama3".to_string(), "mistral".to_string()],
             vec!["deepseek".to_string()],
         )?;
 
         assert_eq!(inserted.name, "worker-a");
         assert_eq!(inserted.role, Role::Worker);
+        assert!(inserted.capture);
 
         let verified = store
             .verify(&token, &[Role::Worker])
@@ -245,6 +264,35 @@ mod tests {
         assert_eq!(verified.name, "worker-a");
         assert_eq!(verified.whitelist_models, vec!["llama3", "mistral"]);
         assert_eq!(verified.blacklist_models, vec!["deepseek"]);
+        assert!(verified.capture);
+
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn update_capture_changes_database_and_cache() -> io::Result<()> {
+        let path = temp_db_path("update_capture");
+        let store = KeyStore::new(path.to_str().expect("utf8 path"))?;
+        let token = Uuid::new_v4().to_string();
+        let inserted = store.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            false,
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        assert!(!inserted.capture);
+        let updated = store
+            .update_capture(inserted.id, true)?
+            .expect("key should exist");
+        assert!(updated.capture);
+        let verified = store
+            .verify(&token, &[Role::Client])
+            .expect("key should verify");
+        assert!(verified.capture);
 
         cleanup(&path);
         Ok(())
@@ -258,6 +306,7 @@ mod tests {
             Uuid::new_v4().to_string(),
             Role::Client,
             "alice".to_string(),
+            false,
             Vec::new(),
             Vec::new(),
         )?;
@@ -266,6 +315,7 @@ mod tests {
             Uuid::new_v4().to_string(),
             Role::Client,
             "alice".to_string(),
+            false,
             Vec::new(),
             Vec::new(),
         );
@@ -288,6 +338,7 @@ mod tests {
             token.clone(),
             Role::Worker,
             "worker-a".to_string(),
+            false,
             Vec::new(),
             Vec::new(),
         )?;
@@ -308,12 +359,15 @@ mod tests {
             token.clone(),
             Role::Client,
             "alice".to_string(),
+            false,
             vec!["llama3".to_string()],
             Vec::new(),
         )?;
 
         let first = store.verify(&token, &[Role::Client]).expect("first verify");
-        let second = store.verify(&token, &[Role::Client]).expect("second verify");
+        let second = store
+            .verify(&token, &[Role::Client])
+            .expect("second verify");
 
         assert_eq!(first.name, "alice");
         assert_eq!(second.name, "alice");
@@ -333,6 +387,7 @@ mod tests {
             name: "alice".to_string(),
             whitelist_models: vec!["llama3".to_string(), "mistral".to_string()],
             blacklist_models: vec!["mistral".to_string()],
+            capture: false,
         };
 
         assert!(record.allows_model("llama3"));
@@ -349,6 +404,7 @@ mod tests {
             name: "alice".to_string(),
             whitelist_models: Vec::new(),
             blacklist_models: vec!["forbidden".to_string()],
+            capture: false,
         };
 
         assert!(record.allows_model("llama3"));
@@ -364,6 +420,7 @@ mod tests {
             name: "alice".to_string(),
             whitelist_models: vec!["bge-m3".to_string()],
             blacklist_models: Vec::new(),
+            capture: false,
         };
 
         assert!(record.allows_model("bge-m3"));
@@ -379,6 +436,7 @@ mod tests {
             name: "alice".to_string(),
             whitelist_models: vec!["bge-m3:latest".to_string()],
             blacklist_models: Vec::new(),
+            capture: false,
         };
 
         assert!(record.allows_model("bge-m3"));
@@ -395,6 +453,7 @@ mod tests {
             name: "alice".to_string(),
             whitelist_models: Vec::new(),
             blacklist_models: vec!["bge-m3".to_string()],
+            capture: false,
         };
 
         assert!(!record.allows_model("bge-m3"));

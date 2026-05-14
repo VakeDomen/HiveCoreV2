@@ -9,8 +9,12 @@ static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Default)]
 pub struct RequestContext {
+    pub key_id: Option<i64>,
     pub key_name: Option<String>,
     pub model: Option<String>,
+    pub capture: bool,
+    pub client_request: Option<HttpRequest>,
+    pub proxy_mutations: Vec<String>,
 }
 
 pub struct ClientTask {

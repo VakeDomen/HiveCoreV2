@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::app::AppState;
 use crate::auth::{KeyRecord, Role};
 use crate::servers::management::models::key_request::KeyRequest;
+use crate::servers::management::models::key_update_request::KeyUpdateRequest;
 use crate::shared::http::{HttpRequest, HttpResponse};
 use crate::shared::log;
 
@@ -36,6 +37,7 @@ pub fn post_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
                 generated_token.clone(),
                 Role::Admin,
                 payload.name.clone(),
+                payload.capture,
                 payload.whitelist_models.clone(),
                 payload.blacklist_models.clone(),
             ),
@@ -48,6 +50,7 @@ pub fn post_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
                 generated_token.clone(),
                 Role::Client,
                 payload.name.clone(),
+                payload.capture,
                 payload.whitelist_models.clone(),
                 payload.blacklist_models.clone(),
             ),
@@ -60,6 +63,7 @@ pub fn post_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
                 generated_token.clone(),
                 Role::Worker,
                 payload.name.clone(),
+                payload.capture,
                 payload.whitelist_models.clone(),
                 payload.blacklist_models.clone(),
             ),
@@ -67,6 +71,28 @@ pub fn post_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
             &generated_token,
             "worker",
         ),
+    }
+}
+
+pub fn patch_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
+    let payload = match serde_json::from_slice::<KeyUpdateRequest>(&request.body) {
+        Ok(payload) => payload,
+        Err(err) => {
+            log::warn(format!("invalid key update request json: {err}"));
+            return HttpResponse::new(400, "Bad Request", b"Invalid JSON body".to_vec());
+        }
+    };
+
+    match state.keys.update_capture(payload.id, payload.capture) {
+        Ok(Some(record)) => json_response(200, "OK", json!(KeyResponse::from(record))),
+        Ok(None) => HttpResponse::new(404, "Not Found", Vec::new()),
+        Err(err) => {
+            log::warn(format!(
+                "failed to update key id={} capture={} error={err}",
+                payload.id, payload.capture
+            ));
+            HttpResponse::new(500, "Internal Server Error", Vec::new())
+        }
     }
 }
 
@@ -124,6 +150,7 @@ struct KeyResponse {
     name: String,
     whitelist_models: Vec<String>,
     blacklist_models: Vec<String>,
+    capture: bool,
 }
 
 impl From<KeyRecord> for KeyResponse {
@@ -135,6 +162,7 @@ impl From<KeyRecord> for KeyResponse {
             name: value.name,
             whitelist_models: value.whitelist_models,
             blacklist_models: value.blacklist_models,
+            capture: value.capture,
         }
     }
 }

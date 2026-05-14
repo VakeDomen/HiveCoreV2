@@ -12,7 +12,7 @@ use crate::servers::proxy::models::response_target::ResponseTarget;
 use crate::servers::proxy::models::route_plan::RoutePlan;
 use crate::servers::proxy::planner::plan_request;
 use crate::shared::http::{
-    ensure_openai_stream_usage, read_request, request_usage_model_name, HttpRequest, HttpResponse,
+    HttpRequest, HttpResponse, ensure_openai_stream_usage, read_request, request_usage_model_name,
 };
 use crate::shared::log;
 
@@ -100,8 +100,11 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
             HttpResponse::new(status, reason, message.as_bytes().to_vec()).write_to(&mut stream)
         }
         RoutePlan::QueueByModel(model) => {
+            let client_request = request.clone();
             let mut request = request;
+            let mut proxy_mutations = Vec::new();
             if ensure_openai_stream_usage(&mut request) {
+                proxy_mutations.push("openai_stream_include_usage".to_string());
                 log::info(format!(
                     "enabled usage metadata for streaming OpenAI-compatible request user={} method={} uri={} model={}",
                     log::bold(user_name),
@@ -114,8 +117,12 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
                 request,
                 &stream,
                 RequestContext {
+                    key_id: visible_key.as_ref().map(|key| key.id),
                     key_name: visible_key.as_ref().map(|key| key.name.clone()),
                     model: Some(model.clone()),
+                    capture: visible_key.as_ref().map(|key| key.capture).unwrap_or(false),
+                    client_request: Some(client_request),
+                    proxy_mutations,
                 },
             )?;
             enqueue_model(
@@ -128,9 +135,12 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
             )
         }
         RoutePlan::QueueByNode(worker) => {
+            let client_request = request.clone();
             let mut request = request;
             let model = request_usage_model_name(&request);
+            let mut proxy_mutations = Vec::new();
             if ensure_openai_stream_usage(&mut request) {
+                proxy_mutations.push("openai_stream_include_usage".to_string());
                 log::info(format!(
                     "enabled usage metadata for streaming OpenAI-compatible node request user={} method={} uri={} worker={}",
                     log::bold(user_name),
@@ -143,8 +153,12 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
                 request,
                 &stream,
                 RequestContext {
+                    key_id: visible_key.as_ref().map(|key| key.id),
                     key_name: visible_key.as_ref().map(|key| key.name.clone()),
                     model,
+                    capture: visible_key.as_ref().map(|key| key.capture).unwrap_or(false),
+                    client_request: Some(client_request),
+                    proxy_mutations,
                 },
             )?;
             enqueue_node(
@@ -243,7 +257,11 @@ mod tests {
             std::sync::mpsc::Sender<crate::shared::http::UsageEvent>,
             std::sync::mpsc::Receiver<crate::shared::http::UsageEvent>,
         ) = std::sync::mpsc::channel();
-        Ok((AppState::new(config, _stats_tx)?, db_path))
+        let (_capture_tx, _capture_rx): (
+            std::sync::mpsc::Sender<crate::shared::capture::CaptureEvent>,
+            std::sync::mpsc::Receiver<crate::shared::capture::CaptureEvent>,
+        ) = std::sync::mpsc::channel();
+        Ok((AppState::new(config, _stats_tx, _capture_tx)?, db_path))
     }
 
     fn request_with_auth(token: Option<&str>, body: &[u8]) -> HttpRequest {
@@ -306,6 +324,7 @@ mod tests {
             token.clone(),
             Role::Client,
             "foras".to_string(),
+            false,
             vec!["llama3".to_string()],
             Vec::new(),
         )?;
@@ -334,6 +353,7 @@ mod tests {
             token.clone(),
             Role::Client,
             "alice".to_string(),
+            false,
             vec!["llama3".to_string()],
             Vec::new(),
         )?;
@@ -353,6 +373,7 @@ mod tests {
             token.clone(),
             Role::Client,
             "alice".to_string(),
+            false,
             vec!["bge-m3".to_string()],
             Vec::new(),
         )?;
@@ -372,6 +393,7 @@ mod tests {
             token.clone(),
             Role::Client,
             "alice".to_string(),
+            false,
             vec!["llama3".to_string()],
             Vec::new(),
         )?;
@@ -391,6 +413,7 @@ mod tests {
             token.clone(),
             Role::Client,
             "alice".to_string(),
+            false,
             vec!["llama3".to_string(), "mistral".to_string()],
             vec!["mistral".to_string()],
         )?;
@@ -410,6 +433,7 @@ mod tests {
             token.clone(),
             Role::Client,
             "alice".to_string(),
+            false,
             vec!["llama3".to_string()],
             Vec::new(),
         )?;
@@ -434,6 +458,7 @@ mod tests {
             token.clone(),
             Role::Client,
             "alice".to_string(),
+            false,
             vec!["llama3".to_string()],
             Vec::new(),
         )?;
@@ -456,6 +481,7 @@ mod tests {
             token.clone(),
             Role::Admin,
             "root".to_string(),
+            false,
             Vec::new(),
             Vec::new(),
         )?;

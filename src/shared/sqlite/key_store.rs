@@ -32,6 +32,7 @@ impl SqliteKeyStore {
         token: String,
         role: Role,
         name: String,
+        capture: bool,
         whitelist_models: Vec<String>,
         blacklist_models: Vec<String>,
     ) -> io::Result<KeyRecord> {
@@ -42,16 +43,26 @@ impl SqliteKeyStore {
         let transaction = connection.transaction().map_err(to_io_error)?;
         transaction
             .execute(
-                "INSERT INTO keys (name, value, role)
-                 VALUES (?1, ?2, ?3)",
-                params![name, token, role.as_str()],
+                "INSERT INTO keys (name, value, role, capture)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![name, token, role.as_str(), capture],
             )
             .map_err(to_io_error)?;
         let key_id = transaction.last_insert_rowid();
-        insert_model_rules(&transaction, key_id, ModelListType::Whitelist, &whitelist_models)
-            .map_err(to_io_error)?;
-        insert_model_rules(&transaction, key_id, ModelListType::Blacklist, &blacklist_models)
-            .map_err(to_io_error)?;
+        insert_model_rules(
+            &transaction,
+            key_id,
+            ModelListType::Whitelist,
+            &whitelist_models,
+        )
+        .map_err(to_io_error)?;
+        insert_model_rules(
+            &transaction,
+            key_id,
+            ModelListType::Blacklist,
+            &blacklist_models,
+        )
+        .map_err(to_io_error)?;
         transaction.commit().map_err(to_io_error)?;
 
         Ok(KeyRecord {
@@ -61,6 +72,7 @@ impl SqliteKeyStore {
             name,
             whitelist_models,
             blacklist_models,
+            capture,
         })
     }
 
@@ -71,7 +83,7 @@ impl SqliteKeyStore {
             .map_err(|_| io::Error::other("key database mutex poisoned"))?;
         let mut statement = connection
             .prepare(
-                "SELECT id, name, value, role
+                "SELECT id, name, value, role, capture
                  FROM keys
                  ORDER BY id ASC",
             )
@@ -85,6 +97,7 @@ impl SqliteKeyStore {
                     role: parse_role(&row.get::<_, String>(3)?).ok_or(SqlError::InvalidQuery)?,
                     whitelist_models: Vec::new(),
                     blacklist_models: Vec::new(),
+                    capture: row.get(4)?,
                 })
             })
             .map_err(to_io_error)?;
@@ -110,7 +123,7 @@ impl SqliteKeyStore {
             .map_err(|_| io::Error::other("key database mutex poisoned"))?;
         let mut statement = connection
             .prepare(
-                "SELECT id, name, value, role
+                "SELECT id, name, value, role, capture
                  FROM keys
                  WHERE value = ?1",
             )
@@ -125,6 +138,7 @@ impl SqliteKeyStore {
                     role: parse_role(&role).ok_or(SqlError::InvalidQuery)?,
                     whitelist_models: Vec::new(),
                     blacklist_models: Vec::new(),
+                    capture: row.get(4)?,
                 })
             })
             .optional()
@@ -134,11 +148,30 @@ impl SqliteKeyStore {
             return Ok(None);
         };
 
-        record.whitelist_models = list_model_rules(&connection, record.id, ModelListType::Whitelist)
-            .map_err(to_io_error)?;
-        record.blacklist_models = list_model_rules(&connection, record.id, ModelListType::Blacklist)
-            .map_err(to_io_error)?;
+        record.whitelist_models =
+            list_model_rules(&connection, record.id, ModelListType::Whitelist)
+                .map_err(to_io_error)?;
+        record.blacklist_models =
+            list_model_rules(&connection, record.id, ModelListType::Blacklist)
+                .map_err(to_io_error)?;
         Ok(Some(record))
+    }
+
+    pub fn update_key_capture(&self, id: i64, capture: bool) -> io::Result<Option<KeyRecord>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| io::Error::other("key database mutex poisoned"))?;
+        let changed = connection
+            .execute(
+                "UPDATE keys SET capture = ?1 WHERE id = ?2",
+                params![capture, id],
+            )
+            .map_err(to_io_error)?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        fetch_key_by_id(&connection, id).map_err(to_io_error)
     }
 }
 
@@ -149,7 +182,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), SqlError> {
              id INTEGER PRIMARY KEY AUTOINCREMENT,
              name TEXT NOT NULL UNIQUE,
              value TEXT NOT NULL UNIQUE,
-             role TEXT NOT NULL
+             role TEXT NOT NULL,
+             capture INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS key_model_rules (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,7 +195,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), SqlError> {
          );
          CREATE INDEX IF NOT EXISTS idx_key_model_rules_lookup
              ON key_model_rules (key_id, list_type, model);",
-    )
+    )?;
+    ensure_keys_capture_column(connection)
 }
 
 fn count_keys(connection: &Connection) -> Result<i64, SqlError> {
@@ -171,13 +206,56 @@ fn count_keys(connection: &Connection) -> Result<i64, SqlError> {
 fn seed_bootstrap_admin(connection: &Connection) -> Result<(), SqlError> {
     let token = Uuid::new_v4().to_string();
     connection.execute(
-        "INSERT OR IGNORE INTO keys (name, value, role)
-         VALUES (?1, ?2, ?3)",
+        "INSERT OR IGNORE INTO keys (name, value, role, capture)
+         VALUES (?1, ?2, ?3, 0)",
         params!["admin", token, Role::Admin.as_str()],
     )?;
     log::warn("created initial admin key in sqlite database");
     log::warn(format!("initial admin name=admin token={token}"));
     Ok(())
+}
+
+fn ensure_keys_capture_column(connection: &Connection) -> Result<(), SqlError> {
+    let mut statement = connection.prepare("PRAGMA table_info(keys)")?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == "capture" {
+            return Ok(());
+        }
+    }
+    connection.execute(
+        "ALTER TABLE keys ADD COLUMN capture INTEGER NOT NULL DEFAULT 0",
+        [],
+    )?;
+    Ok(())
+}
+
+fn fetch_key_by_id(connection: &Connection, id: i64) -> Result<Option<KeyRecord>, SqlError> {
+    let mut statement = connection.prepare(
+        "SELECT id, name, value, role, capture
+         FROM keys
+         WHERE id = ?1",
+    )?;
+    let record = statement
+        .query_row(params![id], |row| {
+            let role: String = row.get(3)?;
+            Ok(KeyRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                token: row.get(2)?,
+                role: parse_role(&role).ok_or(SqlError::InvalidQuery)?,
+                whitelist_models: Vec::new(),
+                blacklist_models: Vec::new(),
+                capture: row.get(4)?,
+            })
+        })
+        .optional()?;
+    let Some(mut record) = record else {
+        return Ok(None);
+    };
+    record.whitelist_models = list_model_rules(connection, record.id, ModelListType::Whitelist)?;
+    record.blacklist_models = list_model_rules(connection, record.id, ModelListType::Blacklist)?;
+    Ok(Some(record))
 }
 
 fn parse_role(value: &str) -> Option<Role> {

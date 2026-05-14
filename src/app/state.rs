@@ -7,6 +7,7 @@ use crate::app::Config;
 use crate::auth::{KeyStore, Role};
 use crate::servers::proxy::queue::RequestQueue;
 use crate::servers::worker::models::worker_status::WorkerStatus;
+use crate::shared::capture::CaptureEvent;
 use crate::shared::http::{HttpRequest, UsageEvent};
 
 pub struct AppState {
@@ -15,16 +16,22 @@ pub struct AppState {
     pub request_queue: RequestQueue,
     pub workers: RwLock<HashMap<String, WorkerStatus>>,
     pub stats_tx: mpsc::Sender<UsageEvent>,
+    pub capture_tx: mpsc::Sender<CaptureEvent>,
 }
 
 impl AppState {
-    pub fn new(config: Config, stats_tx: mpsc::Sender<UsageEvent>) -> io::Result<Self> {
+    pub fn new(
+        config: Config,
+        stats_tx: mpsc::Sender<UsageEvent>,
+        capture_tx: mpsc::Sender<CaptureEvent>,
+    ) -> io::Result<Self> {
         Ok(Self {
             keys: KeyStore::new(&config.database_url)?,
             config,
             request_queue: RequestQueue::default(),
             workers: RwLock::new(HashMap::new()),
             stats_tx,
+            capture_tx,
         })
     }
 }

@@ -10,9 +10,13 @@ use crate::servers::proxy::models::response_target::ResponseTarget;
 use crate::servers::proxy::models::worker_http_response::WorkerHttpResponse;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
 use crate::servers::worker::models::worker_status::WorkerStatus;
+use crate::shared::capture::{
+    CaptureEvent, CaptureTiming, CapturedBody, CapturedResponse, CapturedStreamEvent,
+    ResponseTransfer, capture_body, capture_request, utc_now,
+};
 use crate::shared::http::{
-    read_request_from_reader, serialize_request, write_framed_request, HttpRequest, TokenUsage,
-    UsageEvent,
+    HttpRequest, TokenUsage, UsageEvent, read_request_from_reader, serialize_request,
+    write_framed_request,
 };
 use crate::shared::log;
 
@@ -199,6 +203,7 @@ fn handle_poll(
             .as_deref()
             .unwrap_or("Unauthenticated");
         let started_at = Instant::now();
+        let capture_started_at = utc_now();
         let bytes = serialize_request(&task.request);
         log::info(format!(
             "forwarding request id={} to worker={} user={} method={} uri={} queue_wait={}",
@@ -211,10 +216,13 @@ fn handle_poll(
         ));
         write_framed_request(writer, &bytes)?;
 
+        let mut response_capture = task.context.capture.then(ResponseCaptureBuilder::default);
         let (status_code, token_usage): (u16, Option<TokenUsage>) = match task.response_target {
-            ResponseTarget::ProxyClient(mut client_stream) => {
-                proxy_worker_response(reader, &mut client_stream)?
-            }
+            ResponseTarget::ProxyClient(mut client_stream) => proxy_worker_response_with_capture(
+                reader,
+                &mut client_stream,
+                response_capture.as_mut(),
+            )?,
             ResponseTarget::Capture(sender) => {
                 let response = capture_worker_response(reader)?;
                 let status_code = response.status_code;
@@ -225,6 +233,46 @@ fn handle_poll(
         };
 
         let worker_time = started_at.elapsed();
+        if let Some(builder) = response_capture {
+            if let (Some(key_id), Some(client_request)) =
+                (task.context.key_id, task.context.client_request.as_ref())
+            {
+                let key_name = task
+                    .context
+                    .key_name
+                    .clone()
+                    .unwrap_or_else(|| "Unauthenticated".to_string());
+                let forwarded_request = if task.context.proxy_mutations.is_empty() {
+                    None
+                } else {
+                    Some(capture_request(&task.request))
+                };
+                let total_time = queue_wait + worker_time;
+                let event = CaptureEvent {
+                    schema_version: 1,
+                    request_id,
+                    key_id,
+                    key_name,
+                    worker_name: worker_name.to_string(),
+                    created_at: capture_started_at,
+                    completed_at: utc_now(),
+                    method: request_method.clone(),
+                    uri: request_uri.clone(),
+                    model: task.context.model.clone(),
+                    status_code,
+                    timing: CaptureTiming {
+                        queue_ms: queue_wait.as_millis() as u64,
+                        worker_ms: worker_time.as_millis() as u64,
+                        total_ms: total_time.as_millis() as u64,
+                    },
+                    client_request: capture_request(client_request),
+                    forwarded_request,
+                    proxy_mutations: task.context.proxy_mutations.clone(),
+                    response: builder.finish(status_code),
+                };
+                let _ = state.capture_tx.send(event);
+            }
+        }
 
         // Record successful inference requests. Some upstreams do not return usage metadata,
         // so those requests are still counted with zero tokens.
@@ -303,11 +351,27 @@ where
     R: BufRead,
     W: Write,
 {
+    proxy_worker_response_with_capture(reader, client_stream, None)
+}
+
+fn proxy_worker_response_with_capture<R, W>(
+    reader: &mut R,
+    client_stream: &mut W,
+    mut capture: Option<&mut ResponseCaptureBuilder>,
+) -> io::Result<(u16, Option<TokenUsage>)>
+where
+    R: BufRead,
+    W: Write,
+{
     let mut status_line = String::new();
     reader.read_line(&mut status_line)?;
     if status_line.trim().is_empty() {
         log::warn("worker returned empty status line");
         write_empty_response(client_stream, 502, "Bad Gateway")?;
+        if let Some(capture) = capture.as_deref_mut() {
+            capture.status_line = "HTTP/1.1 502 Bad Gateway".to_string();
+            capture.transfer = ResponseTransfer::Empty;
+        }
         return Ok((502, None));
     }
 
@@ -338,6 +402,10 @@ where
             headers.push((name.trim().to_string(), value));
         }
     }
+    if let Some(capture) = capture.as_deref_mut() {
+        capture.status_line = status_line.trim_end().to_string();
+        capture.headers = headers.clone();
+    }
 
     client_stream.write_all(status_line.as_bytes())?;
     for (name, value) in sanitize_response_headers(&headers, chunked) {
@@ -346,16 +414,31 @@ where
     client_stream.write_all(b"\r\n")?;
 
     let observed_usage = if chunked {
-        relay_chunked_body(reader, client_stream)?
+        if let Some(capture) = capture.as_deref_mut() {
+            capture.transfer = ResponseTransfer::Chunked;
+        }
+        relay_chunked_body(reader, client_stream, capture)?
     } else if let Some(length) = content_length {
         let mut body = vec![0_u8; length];
         reader.read_exact(&mut body)?;
         client_stream.write_all(&body)?;
+        if let Some(capture) = capture.as_deref_mut() {
+            capture.transfer = ResponseTransfer::FixedLength;
+            capture.body = Some(capture_body(&body));
+        }
         crate::shared::http::parse_usage_json(&String::from_utf8_lossy(&body))
     } else {
         let mut body = Vec::new();
         reader.read_to_end(&mut body)?;
         client_stream.write_all(&body)?;
+        if let Some(capture) = capture.as_deref_mut() {
+            capture.transfer = if body.is_empty() {
+                ResponseTransfer::Empty
+            } else {
+                ResponseTransfer::UntilEof
+            };
+            capture.body = Some(capture_body(&body));
+        }
         crate::shared::http::parse_usage_json(&String::from_utf8_lossy(&body))
     };
 
@@ -472,7 +555,11 @@ fn transfer_encoding_is_chunked(value: &str) -> bool {
         .any(|part| part.trim().eq_ignore_ascii_case("chunked"))
 }
 
-fn relay_chunked_body<R, W>(reader: &mut R, client_stream: &mut W) -> io::Result<Option<TokenUsage>>
+fn relay_chunked_body<R, W>(
+    reader: &mut R,
+    client_stream: &mut W,
+    mut capture: Option<&mut ResponseCaptureBuilder>,
+) -> io::Result<Option<TokenUsage>>
 where
     R: BufRead,
     W: Write,
@@ -498,6 +585,9 @@ where
         let mut chunk = vec![0_u8; size];
         reader.read_exact(&mut chunk)?;
         client_stream.write_all(&chunk)?;
+        if let Some(capture) = capture.as_deref_mut() {
+            capture.push_event(chunk.len(), capture_body(&chunk));
+        }
 
         let mut crlf = [0_u8; 2];
         reader.read_exact(&mut crlf)?;
@@ -507,6 +597,38 @@ where
     }
 
     Ok(usage_scanner.finish())
+}
+
+#[derive(Default)]
+struct ResponseCaptureBuilder {
+    status_line: String,
+    headers: Vec<(String, String)>,
+    transfer: ResponseTransfer,
+    body: Option<CapturedBody>,
+    events: Vec<CapturedStreamEvent>,
+}
+
+impl ResponseCaptureBuilder {
+    fn push_event(&mut self, chunk_size: usize, body: CapturedBody) {
+        self.events.push(CapturedStreamEvent {
+            index: self.events.len(),
+            received_at: utc_now(),
+            chunk_size,
+            body,
+        });
+    }
+
+    fn finish(self, status_code: u16) -> CapturedResponse {
+        CapturedResponse {
+            status_line: self.status_line,
+            status_code,
+            headers: self.headers,
+            transfer: self.transfer,
+            body: self.body,
+            events: self.events,
+            derived: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -647,7 +769,10 @@ mod tests {
 
     use crate::shared::http::TokenUsage;
 
-    use super::{parse_chunk_size, proxy_worker_response};
+    use super::{
+        ResponseCaptureBuilder, parse_chunk_size, proxy_worker_response,
+        proxy_worker_response_with_capture,
+    };
 
     #[test]
     fn proxy_worker_response_removes_content_length_from_chunked_response() -> io::Result<()> {
@@ -701,6 +826,42 @@ mod tests {
                 completion_tokens: 4,
             })
         );
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_worker_response_captures_chunked_events_in_order() -> io::Result<()> {
+        let first = r#"{"response":"hel","done":false}"#;
+        let second = r#"{"response":"lo","done":true}"#;
+        let worker_response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Transfer-Encoding: chunked\r\n\
+             \r\n\
+             {:x}\r\n\
+             {}\r\n\
+             {:x}\r\n\
+             {}\r\n\
+             0\r\n\
+             \r\n",
+            first.len(),
+            first,
+            second.len(),
+            second
+        );
+        let mut reader = BufReader::new(worker_response.as_bytes());
+        let mut relayed = Vec::new();
+        let mut capture = ResponseCaptureBuilder::default();
+
+        let (status_code, _) =
+            proxy_worker_response_with_capture(&mut reader, &mut relayed, Some(&mut capture))?;
+        let response = capture.finish(status_code);
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.events.len(), 2);
+        assert_eq!(response.events[0].index, 0);
+        assert_eq!(response.events[0].body.data, first);
+        assert_eq!(response.events[1].index, 1);
+        assert_eq!(response.events[1].body.data, second);
         Ok(())
     }
 

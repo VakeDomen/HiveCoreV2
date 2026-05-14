@@ -8,4 +8,5 @@ pub struct KeyRecord {
     pub name: String,
     pub whitelist_models: Vec<String>,
     pub blacklist_models: Vec<String>,
+    pub capture: bool,
 }
