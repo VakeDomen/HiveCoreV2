@@ -12,7 +12,7 @@ use crate::servers::worker::models::worker_phase::WorkerPhase;
 use crate::servers::worker::models::worker_status::WorkerStatus;
 use crate::shared::capture::{
     CaptureEvent, CaptureTiming, CapturedBody, CapturedResponse, CapturedStreamEvent,
-    ResponseTransfer, capture_body, capture_request, utc_now,
+    ResponseTransfer, capture_body, capture_request, redact_embedding_vectors, utc_now,
 };
 use crate::shared::http::{
     HttpRequest, TokenUsage, UsageEvent, read_request_from_reader, serialize_request,
@@ -268,7 +268,7 @@ fn handle_poll(
                     client_request: capture_request(client_request),
                     forwarded_request,
                     proxy_mutations: task.context.proxy_mutations.clone(),
-                    response: builder.finish(status_code),
+                    response: captured_response_for_request(builder.finish(status_code), &request_uri),
                 };
                 let _ = state.capture_tx.send(event);
             }
@@ -547,6 +547,19 @@ fn sanitize_response_headers(headers: &[(String, String)], chunked: bool) -> Vec
     }
 
     sanitized
+}
+
+fn captured_response_for_request(
+    mut response: CapturedResponse,
+    request_uri: &str,
+) -> CapturedResponse {
+    if matches!(
+        request_uri,
+        "/api/embed" | "/api/embeddings" | "/v1/embeddings"
+    ) {
+        redact_embedding_vectors(&mut response);
+    }
+    response
 }
 
 fn transfer_encoding_is_chunked(value: &str) -> bool {
@@ -862,6 +875,36 @@ mod tests {
         assert_eq!(response.events[0].body.data, first);
         assert_eq!(response.events[1].index, 1);
         assert_eq!(response.events[1].body.data, second);
+        Ok(())
+    }
+
+    #[test]
+    fn embedding_capture_redacts_vectors() -> io::Result<()> {
+        let body = r#"{"model":"nomic-embed-text","embeddings":[[0.1,0.2,0.3],[0.4,0.5,0.6]]}"#;
+        let worker_response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             \r\n\
+             {}",
+            body.len(),
+            body
+        );
+        let mut reader = BufReader::new(worker_response.as_bytes());
+        let mut relayed = Vec::new();
+        let mut capture = ResponseCaptureBuilder::default();
+
+        let (status_code, _) =
+            proxy_worker_response_with_capture(&mut reader, &mut relayed, Some(&mut capture))?;
+        let response = super::captured_response_for_request(capture.finish(status_code), "/api/embed");
+        let captured_body = response.body.expect("fixed response body");
+        let value = captured_body.json.expect("captured json");
+
+        assert_eq!(value["embeddings"]["redacted"], true);
+        assert_eq!(value["embeddings"]["count"], 2);
+        assert_eq!(value["embeddings"]["dimensions"], 3);
+        assert!(!captured_body.data.contains("0.1"));
+        assert!(!captured_body.data.contains("0.6"));
         Ok(())
     }
 

@@ -11,6 +11,7 @@ use serde_json::json;
 
 use crate::app::AppState;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
+use crate::shared::capture::{CaptureCompressionReport, compress_capture_day};
 use crate::shared::log;
 use crate::shared::sqlite::usage_tracking::{DailyUsageRow, UsageTrackingDb, current_local_day};
 
@@ -30,8 +31,13 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
     let mut current_day = current_local_day();
 
     loop {
-        if let Err(err) =
-            send_daily_report_if_needed(&client, &db, settings.user_id, &mut current_day)
+        if let Err(err) = send_daily_report_if_needed(
+            &client,
+            &db,
+            &state,
+            settings.user_id,
+            &mut current_day,
+        )
         {
             log::warn(format!("telegram daily report failed: {err}"));
         }
@@ -378,9 +384,33 @@ fn format_duration_short(duration_ms: u64) -> String {
     }
 }
 
+fn format_bytes(value: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut amount = value as f64;
+    let mut unit = 0_usize;
+    while amount >= 1024.0 && unit + 1 < UNITS.len() {
+        amount /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", value, UNITS[unit])
+    } else {
+        format!("{amount:.1} {}", UNITS[unit])
+    }
+}
+
+fn format_signed_bytes(value: i64) -> String {
+    if value < 0 {
+        format!("-{}", format_bytes(value.unsigned_abs()))
+    } else {
+        format_bytes(value as u64)
+    }
+}
+
 fn send_daily_report_if_needed(
     client: &TelegramClient,
     db: &UsageTrackingDb,
+    state: &AppState,
     user_id: i64,
     current_day: &mut NaiveDate,
 ) -> io::Result<()> {
@@ -391,8 +421,51 @@ fn send_daily_report_if_needed(
 
     let previous_day = *current_day;
     *current_day = now_day;
-    let report = format_usage_report(previous_day, &db.usage_report_for_day(previous_day)?);
+    let usage_report = format_usage_report(previous_day, &db.usage_report_for_day(previous_day)?);
+    let capture_report = match compress_capture_day(&state.config.capture_dir, previous_day) {
+        Ok(report) => report,
+        Err(err) => {
+            log::warn(format!("capture compression failed for day={previous_day}: {err}"));
+            CaptureCompressionReport {
+                day: previous_day,
+                errors: vec![err.to_string()],
+                ..CaptureCompressionReport::default()
+            }
+        }
+    };
+    let report = format_daily_report(&usage_report, &capture_report);
     client.send_message(user_id, &report)
+}
+
+fn format_daily_report(usage_report: &str, capture_report: &CaptureCompressionReport) -> String {
+    [
+        usage_report.to_string(),
+        String::new(),
+        format_capture_compression_report(capture_report),
+    ]
+    .join("\n")
+}
+
+fn format_capture_compression_report(report: &CaptureCompressionReport) -> String {
+    let mut lines = vec![
+        format!(
+            "<b>Capture compression for {}</b>",
+            report.day.format("%Y-%m-%d")
+        ),
+        format!("  Captures: {}", report.captures),
+        format!("  Files compressed: {}", report.files_compressed),
+        format!("  Already compressed: {}", report.files_already_compressed),
+        format!("  Original: {}", format_bytes(report.original_bytes)),
+        format!("  Compressed: {}", format_bytes(report.compressed_bytes)),
+        format!("  Saved: {}", format_signed_bytes(report.bytes_saved())),
+    ];
+    if !report.errors.is_empty() {
+        lines.push(format!("  Errors: {}", report.errors.len()));
+        for error in report.errors.iter().take(3) {
+            lines.push(format!("    {}", escape_html(error)));
+        }
+    }
+    lines.join("\n")
 }
 
 fn worker_phase_name(phase: WorkerPhase) -> &'static str {
@@ -443,9 +516,10 @@ struct TelegramUser {
 mod tests {
     use chrono::NaiveDate;
 
+    use crate::shared::capture::CaptureCompressionReport;
     use crate::shared::sqlite::usage_tracking::DailyUsageRow;
 
-    use super::format_usage_report;
+    use super::{format_capture_compression_report, format_usage_report};
 
     #[test]
     fn usage_report_formats_totals_and_rows() {
@@ -468,5 +542,26 @@ mod tests {
         assert!(report.contains("  Models:"));
         assert!(report.contains("  • <code>bge-m3</code>"));
         assert!(report.contains("    2 req | 17 in | 5 out"));
+    }
+
+    #[test]
+    fn capture_compression_report_formats_summary() {
+        let report = format_capture_compression_report(&CaptureCompressionReport {
+            day: NaiveDate::from_ymd_opt(2026, 4, 28).expect("valid date"),
+            files_compressed: 2,
+            files_already_compressed: 1,
+            captures: 42,
+            original_bytes: 4096,
+            compressed_bytes: 1024,
+            errors: Vec::new(),
+        });
+
+        assert!(report.contains("Capture compression for 2026-04-28"));
+        assert!(report.contains("  Captures: 42"));
+        assert!(report.contains("  Files compressed: 2"));
+        assert!(report.contains("  Already compressed: 1"));
+        assert!(report.contains("  Original: 4.0 KB"));
+        assert!(report.contains("  Compressed: 1.0 KB"));
+        assert!(report.contains("  Saved: 3.0 KB"));
     }
 }
