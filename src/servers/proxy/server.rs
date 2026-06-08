@@ -8,6 +8,7 @@ use crate::app::AppState;
 use crate::servers::proxy::admission::authorize_request;
 use crate::servers::proxy::admission::authorized_key;
 use crate::servers::proxy::models::client_task::{ClientTask, RequestContext};
+use crate::servers::proxy::models::model_route_kind::ModelRouteKind;
 use crate::servers::proxy::models::response_target::ResponseTarget;
 use crate::servers::proxy::models::route_plan::RoutePlan;
 use crate::servers::proxy::planner::plan_request;
@@ -99,7 +100,7 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
             ));
             HttpResponse::new(status, reason, message.as_bytes().to_vec()).write_to(&mut stream)
         }
-        RoutePlan::QueueByModel(model) => {
+        RoutePlan::QueueByModel { model, kind } => {
             let client_request = request.clone();
             let mut request = request;
             let mut proxy_mutations = Vec::new();
@@ -128,6 +129,7 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
             enqueue_model(
                 &state,
                 model,
+                kind,
                 task,
                 &request_method,
                 &request_uri,
@@ -188,12 +190,13 @@ fn client_task(
 fn enqueue_model(
     state: &Arc<AppState>,
     model: String,
+    kind: ModelRouteKind,
     task: ClientTask,
     request_method: &str,
     request_uri: &str,
     stream: &mut TcpStream,
 ) -> io::Result<()> {
-    if let Err(message) = state.request_queue.enqueue_model(model, task) {
+    if let Err(message) = state.request_queue.enqueue_model(model, kind, task) {
         log::warn(format!(
             "rejecting client request method={} uri={} reason={}",
             request_method, request_uri, message
@@ -451,6 +454,31 @@ mod tests {
     }
 
     #[test]
+    fn rejects_vllm_request_when_model_not_in_whitelist() -> io::Result<()> {
+        let (state, db_path) = test_state("vllm_whitelist_reject", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            false,
+            vec!["llama3".to_string()],
+            Vec::new(),
+        )?;
+        let request = request_with_auth_to(
+            "POST",
+            "/rerank",
+            Some(&token),
+            br#"{"model":"reranker","query":"q","documents":["d"]}"#,
+        );
+
+        assert_eq!(authorize_request(&state, &request), Err(403));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_node_targeted_request_for_client_key() -> io::Result<()> {
         let (state, db_path) = test_state("node_client_reject", true)?;
         let token = Uuid::new_v4().to_string();
@@ -468,6 +496,77 @@ mod tests {
             .insert("node".to_string(), "worker-a".to_string());
 
         assert_eq!(authorize_request(&state, &request), Err(403));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_admin_only_proxy_route_for_client_key() -> io::Result<()> {
+        let (state, db_path) = test_state("admin_only_client_reject", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            false,
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let request = request_with_auth_to(
+            "DELETE",
+            "/api/delete",
+            Some(&token),
+            br#"{"model":"llama3"}"#,
+        );
+
+        assert_eq!(authorize_request(&state, &request), Err(403));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_vllm_control_route_for_client_key() -> io::Result<()> {
+        let (state, db_path) = test_state("vllm_control_client_reject", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            false,
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let request =
+            request_with_auth_to("POST", "/sleep", Some(&token), br#"{"level":1}"#);
+
+        assert_eq!(authorize_request(&state, &request), Err(403));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_admin_only_proxy_route_for_admin_key() -> io::Result<()> {
+        let (state, db_path) = test_state("admin_only_admin_ok", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Admin,
+            "root".to_string(),
+            false,
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let request = request_with_auth_to(
+            "GET",
+            "/load",
+            Some(&token),
+            b"",
+        );
+
+        assert_eq!(authorize_request(&state, &request), Ok(()));
 
         cleanup(&db_path);
         Ok(())

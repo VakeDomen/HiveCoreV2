@@ -8,15 +8,16 @@ use crate::app::AppState;
 use crate::auth::Role;
 use crate::servers::proxy::models::response_target::ResponseTarget;
 use crate::servers::proxy::models::worker_http_response::WorkerHttpResponse;
+use crate::servers::worker::models::worker_backend::WorkerBackend;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
 use crate::servers::worker::models::worker_status::WorkerStatus;
 use crate::shared::capture::{
-    CaptureEvent, CaptureTiming, CapturedBody, CapturedResponse, CapturedStreamEvent,
-    ResponseTransfer, capture_body, capture_request, redact_embedding_vectors, utc_now,
+    capture_body, capture_request, redact_embedding_vectors, utc_now, CaptureEvent, CaptureTiming,
+    CapturedBody, CapturedResponse, CapturedStreamEvent, ResponseTransfer,
 };
 use crate::shared::http::{
-    HttpRequest, TokenUsage, UsageEvent, read_request_from_reader, serialize_request,
-    write_framed_request,
+    read_request_from_reader, serialize_request, write_framed_request, HttpRequest, TokenUsage,
+    UsageEvent,
 };
 use crate::shared::log;
 
@@ -71,9 +72,11 @@ fn handle_connection(state: Arc<AppState>, stream: TcpStream) -> io::Result<()> 
         };
 
         match request.method.as_str() {
-            "POLL" => handle_poll(&state, &worker_name, &request, &mut writer, &mut reader)?,
-            "PING" => touch_worker(&state, &worker_name, None, WorkerPhase::Polling),
-            _ => touch_worker(&state, &worker_name, None, WorkerPhase::Polling),
+            "POLL" | "POLL-OLLAMA" | "POLL-VLLM" => {
+                handle_poll(&state, &worker_name, &request, &mut writer, &mut reader)?
+            }
+            "PING" => touch_worker(&state, &worker_name, None, None, WorkerPhase::Polling),
+            _ => touch_worker(&state, &worker_name, None, None, WorkerPhase::Polling),
         }
     }
 }
@@ -132,6 +135,7 @@ fn authenticate_worker(
                 nonce,
                 hive_version,
                 ollama_version,
+                backend: WorkerBackend::OllamaLegacy,
                 tags: Vec::new(),
                 state: WorkerPhase::Authenticating,
                 last_ping: Instant::now(),
@@ -152,7 +156,7 @@ fn authenticate_worker(
     };
     let bytes = serialize_request(&response);
     write_framed_request(writer, &bytes)?;
-    touch_worker(state, &worker_name, None, WorkerPhase::Polling);
+    touch_worker(state, &worker_name, None, None, WorkerPhase::Polling);
     log::info(format!(
         "worker auth accepted name={} role={} hive_version={} ollama_version={}",
         log::bold(&worker_name),
@@ -170,29 +174,41 @@ fn handle_poll(
     writer: &mut TcpStream,
     reader: &mut BufReader<TcpStream>,
 ) -> io::Result<()> {
-    let incoming_tags = if poll_request.uri == "-" {
-        None
-    } else {
-        Some(
-            poll_request
-                .uri
-                .split(';')
-                .filter(|part| !part.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>(),
-        )
+    let Some(backend) = WorkerBackend::from_poll_method(&poll_request.method) else {
+        return Ok(());
     };
-    touch_worker(state, worker_name, incoming_tags, WorkerPhase::Polling);
+    let incoming_tags = (poll_request.uri != "-").then(|| {
+        poll_request
+            .uri
+            .split(';')
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+    touch_worker(
+        state,
+        worker_name,
+        incoming_tags,
+        Some(backend),
+        WorkerPhase::Polling,
+    );
 
-    let tags = state
+    let (tags, backend) = state
         .workers
         .read()
         .ok()
-        .and_then(|guard| guard.get(worker_name).map(|worker| worker.tags.clone()))
-        .unwrap_or_default();
+        .and_then(|guard| {
+            guard
+                .get(worker_name)
+                .map(|worker| (worker.tags.clone(), worker.backend))
+        })
+        .unwrap_or_else(|| (Vec::new(), backend));
 
-    if let Some(task) = state.request_queue.dequeue_for_worker(worker_name, &tags) {
-        touch_worker(state, worker_name, None, WorkerPhase::Working);
+    if let Some(task) = state
+        .request_queue
+        .dequeue_for_worker(worker_name, backend, &tags)
+    {
+        touch_worker(state, worker_name, None, None, WorkerPhase::Working);
         let request_id = task.id;
         let request_method = task.request.method.clone();
         let request_uri = task.request.uri.clone();
@@ -268,7 +284,10 @@ fn handle_poll(
                     client_request: capture_request(client_request),
                     forwarded_request,
                     proxy_mutations: task.context.proxy_mutations.clone(),
-                    response: captured_response_for_request(builder.finish(status_code), &request_uri),
+                    response: captured_response_for_request(
+                        builder.finish(status_code),
+                        &request_uri,
+                    ),
                 };
                 let _ = state.capture_tx.send(event);
             }
@@ -315,7 +334,7 @@ fn handle_poll(
             let _ = state.stats_tx.send(usage_event);
         }
 
-        touch_worker(state, worker_name, None, WorkerPhase::Polling);
+        touch_worker(state, worker_name, None, None, WorkerPhase::Polling);
         let total_time = queue_wait + worker_time;
         log::success(format!(
             "resolved request id={} user={} worker={} method={} uri={} status={} wait={} worker_time={} total={}",
@@ -734,12 +753,16 @@ fn touch_worker(
     state: &Arc<AppState>,
     worker_name: &str,
     tags: Option<Vec<String>>,
+    backend: Option<WorkerBackend>,
     phase: WorkerPhase,
 ) {
     if let Ok(mut guard) = state.workers.write() {
         if let Some(worker) = guard.get_mut(worker_name) {
             if let Some(tags) = tags {
                 worker.tags = tags;
+            }
+            if let Some(backend) = backend {
+                worker.backend = backend;
             }
             worker.state = phase;
             worker.last_ping = Instant::now();
@@ -783,8 +806,8 @@ mod tests {
     use crate::shared::http::TokenUsage;
 
     use super::{
-        ResponseCaptureBuilder, parse_chunk_size, proxy_worker_response,
-        proxy_worker_response_with_capture,
+        parse_chunk_size, proxy_worker_response, proxy_worker_response_with_capture,
+        ResponseCaptureBuilder,
     };
 
     #[test]
@@ -896,7 +919,8 @@ mod tests {
 
         let (status_code, _) =
             proxy_worker_response_with_capture(&mut reader, &mut relayed, Some(&mut capture))?;
-        let response = super::captured_response_for_request(capture.finish(status_code), "/api/embed");
+        let response =
+            super::captured_response_for_request(capture.finish(status_code), "/api/embed");
         let captured_body = response.body.expect("fixed response body");
         let value = captured_body.json.expect("captured json");
 

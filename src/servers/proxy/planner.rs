@@ -3,13 +3,15 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::app::AppState;
 use crate::auth::KeyRecord;
+use crate::servers::worker::models::worker_backend::WorkerBackend;
 use crate::shared::http::{HttpRequest, HttpResponse};
 use crate::shared::log;
 
+use super::models::model_route_kind::ModelRouteKind;
 use super::models::route_plan::RoutePlan;
 use super::probe::{probe_worker_json, probe_worker_version};
 
@@ -28,10 +30,17 @@ enum ProxyEndpoint {
     Version,
 
     OpenAiChatCompletions,
+    OpenAiChatCompletionsBatch,
     OpenAiCompletions,
     OpenAiEmbeddings,
     OpenAiModels,
     OpenAiModel { model: String },
+    VllmCohereEmbed,
+    VllmScore,
+    VllmRerank,
+    VllmModelFieldRoute,
+    VllmAnyWorker,
+    VllmTargetedOnly,
 
     // LoadModel { model: String },
     // UnloadModel { model: String },
@@ -58,16 +67,30 @@ pub fn plan_request(
 
     match classify_endpoint(request) {
         ProxyEndpoint::Generate | ProxyEndpoint::Chat | ProxyEndpoint::Embed => {
-            route_by_required_model(request)
+            route_by_required_model(request, ModelRouteKind::OllamaNative)
         }
 
-        ProxyEndpoint::OpenAiChatCompletions => route_openai_chat_request(request),
-        ProxyEndpoint::OpenAiCompletions => route_openai_completion_request(request),
-        ProxyEndpoint::OpenAiEmbeddings => route_openai_embedding_request(request),
+        ProxyEndpoint::OpenAiChatCompletions | ProxyEndpoint::OpenAiChatCompletionsBatch => {
+            route_openai_model_request(request)
+        }
+        ProxyEndpoint::OpenAiCompletions => route_openai_model_request(request),
+        ProxyEndpoint::OpenAiEmbeddings => route_openai_model_request(request),
         ProxyEndpoint::OpenAiModels => local_openai_models_response(state, visible_key),
         ProxyEndpoint::OpenAiModel { model } => {
             local_openai_model_response(state, visible_key, &model)
         }
+        ProxyEndpoint::VllmCohereEmbed
+        | ProxyEndpoint::VllmScore
+        | ProxyEndpoint::VllmRerank
+        | ProxyEndpoint::VllmModelFieldRoute => {
+            route_by_required_model(request, ModelRouteKind::VllmSpecific)
+        }
+        ProxyEndpoint::VllmAnyWorker => route_to_any_backend(state, WorkerBackendFilter::Vllm),
+        ProxyEndpoint::VllmTargetedOnly => RoutePlan::Reject {
+            status: 400,
+            reason: "Bad Request",
+            message: "this vLLM control route requires a Node header",
+        },
 
         // ProxyEndpoint::LoadModel { model } => route_load_model_request(state, visible_key, &model),
         // ProxyEndpoint::UnloadModel { model } => {
@@ -112,9 +135,30 @@ fn classify_endpoint(request: &HttpRequest) -> ProxyEndpoint {
         ("GET", "/health") => return ProxyEndpoint::Health,
 
         ("POST", "/v1/chat/completions") => return ProxyEndpoint::OpenAiChatCompletions,
+        ("POST", "/v1/chat/completions/batch") => return ProxyEndpoint::OpenAiChatCompletionsBatch,
         ("POST", "/v1/completions") => return ProxyEndpoint::OpenAiCompletions,
         ("POST", "/v1/embeddings") => return ProxyEndpoint::OpenAiEmbeddings,
         ("GET", "/v1/models") => return ProxyEndpoint::OpenAiModels,
+        ("POST", "/v2/embed") => return ProxyEndpoint::VllmCohereEmbed,
+        ("POST", "/score") | ("POST", "/v1/score") => return ProxyEndpoint::VllmScore,
+        ("POST", "/rerank") | ("POST", "/v1/rerank") | ("POST", "/v2/rerank") => {
+            return ProxyEndpoint::VllmRerank;
+        }
+        ("POST", "/tokenize") | ("POST", "/detokenize") => {
+            return ProxyEndpoint::VllmModelFieldRoute
+        }
+        ("GET", "/tokenizer_info")
+        | ("GET", "/version")
+        | ("GET", "/load")
+        | ("GET", "/is_sleeping") => return ProxyEndpoint::VllmAnyWorker,
+        ("GET", "/metrics") => return ProxyEndpoint::VllmTargetedOnly,
+        ("POST", "/v1/load_lora_adapter")
+        | ("POST", "/v1/unload_lora_adapter")
+        | ("POST", "/v1/lora_adapters")
+        | ("POST", "/start_profile")
+        | ("POST", "/stop_profile")
+        | ("POST", "/sleep")
+        | ("POST", "/wake_up") => return ProxyEndpoint::VllmTargetedOnly,
         _ => {}
     }
 
@@ -136,23 +180,12 @@ fn classify_endpoint(request: &HttpRequest) -> ProxyEndpoint {
     ProxyEndpoint::Unknown
 }
 
-fn route_openai_chat_request(request: &HttpRequest) -> RoutePlan {
+fn route_openai_model_request(request: &HttpRequest) -> RoutePlan {
     match json_string_field(&request.body, "model") {
-        Some(model) => RoutePlan::QueueByModel(model),
-        None => missing_field("model"),
-    }
-}
-
-fn route_openai_completion_request(request: &HttpRequest) -> RoutePlan {
-    match json_string_field(&request.body, "model") {
-        Some(model) => RoutePlan::QueueByModel(model),
-        None => missing_field("model"),
-    }
-}
-
-fn route_openai_embedding_request(request: &HttpRequest) -> RoutePlan {
-    match json_string_field(&request.body, "model") {
-        Some(model) => RoutePlan::QueueByModel(model),
+        Some(model) => RoutePlan::QueueByModel {
+            model,
+            kind: ModelRouteKind::OpenAiCompatible,
+        },
         None => missing_field("model"),
     }
 }
@@ -166,7 +199,7 @@ fn route_load_model_request(
         return not_found_for_masked_model();
     }
 
-    let owners = model_owners(state, model);
+    let owners = model_owners(state, model, WorkerBackendFilter::Any);
     if !owners.is_empty() {
         return RoutePlan::QueueByNode(owners[0].clone());
     }
@@ -188,7 +221,7 @@ fn route_unload_model_request(
         return not_found_for_masked_model();
     }
 
-    let owners = model_owners(state, model);
+    let owners = model_owners(state, model, WorkerBackendFilter::Any);
     if owners.is_empty() {
         return no_workers_available();
     }
@@ -239,24 +272,19 @@ fn local_openai_models_response(state: &AppState, visible_key: Option<&KeyRecord
     }
 
     let mut by_name = BTreeMap::new();
-    for value in parallel_probe_json(state, workers, "/api/tags", None) {
-        if let Some(models) = value.get("models").and_then(Value::as_array) {
+    for value in parallel_probe_json(state, workers, "/v1/models", None) {
+        if let Some(models) = value.get("data").and_then(Value::as_array) {
             for model in models {
-                let Some(name) = model.get("name").and_then(Value::as_str) else {
+                let Some(name) = model.get("id").and_then(Value::as_str) else {
                     continue;
                 };
                 if !model_visible(visible_key, name) {
                     continue;
                 }
 
-                by_name.entry(name.to_string()).or_insert_with(|| {
-                    json!({
-                        "id": name,
-                        "object": "model",
-                        "created": 0,
-                        "owned_by": "ollama"
-                    })
-                });
+                by_name
+                    .entry(name.to_string())
+                    .or_insert_with(|| model.clone());
             }
         }
     }
@@ -276,7 +304,7 @@ fn local_openai_model_response(
         return not_found_for_masked_model();
     }
 
-    let owners = model_owners(state, model);
+    let owners = model_owners(state, model, WorkerBackendFilter::Any);
     if owners.is_empty() {
         return RoutePlan::Reject {
             status: 404,
@@ -293,9 +321,9 @@ fn local_openai_model_response(
     })))
 }
 
-fn route_by_required_model(request: &HttpRequest) -> RoutePlan {
+fn route_by_required_model(request: &HttpRequest, kind: ModelRouteKind) -> RoutePlan {
     match json_string_field(&request.body, "model") {
-        Some(model) => RoutePlan::QueueByModel(model),
+        Some(model) => RoutePlan::QueueByModel { model, kind },
         None => missing_field("model"),
     }
 }
@@ -311,7 +339,7 @@ fn route_show_request(
     if !model_visible(visible_key, &model) {
         return not_found_for_masked_model();
     }
-    route_to_owner(state, &model)
+    route_to_owner(state, &model, WorkerBackendFilter::Ollama)
 }
 
 fn route_create_request(
@@ -329,7 +357,7 @@ fn route_create_request(
     if !model_visible(visible_key, &from) {
         return not_found_for_masked_model();
     }
-    route_to_owner(state, &from)
+    route_to_owner(state, &from, WorkerBackendFilter::Ollama)
 }
 
 fn route_copy_request(
@@ -343,11 +371,11 @@ fn route_copy_request(
     if !model_visible(visible_key, &source) {
         return not_found_for_masked_model();
     }
-    route_to_owner(state, &source)
+    route_to_owner(state, &source, WorkerBackendFilter::Ollama)
 }
 
 fn route_pull_request(state: &AppState) -> RoutePlan {
-    let workers = connected_workers(state);
+    let workers = connected_workers_by_backend(state, WorkerBackendFilter::Ollama);
     if workers.is_empty() {
         return no_workers_available();
     }
@@ -365,7 +393,7 @@ fn route_push_request(
     if !model_visible(visible_key, &model) {
         return not_found_for_masked_model();
     }
-    route_to_owner(state, &model)
+    route_to_owner(state, &model, WorkerBackendFilter::Ollama)
 }
 
 fn route_delete_request(
@@ -379,15 +407,15 @@ fn route_delete_request(
     if !model_visible(visible_key, &model) {
         return not_found_for_masked_model();
     }
-    let owners = model_owners(state, &model);
+    let owners = model_owners(state, &model, WorkerBackendFilter::Ollama);
     if owners.is_empty() {
         return no_workers_available();
     }
     RoutePlan::QueueByNode(owners[0].clone())
 }
 
-fn route_to_owner(state: &AppState, model: &str) -> RoutePlan {
-    let owners = model_owners(state, model);
+fn route_to_owner(state: &AppState, model: &str, filter: WorkerBackendFilter) -> RoutePlan {
+    let owners = model_owners(state, model, filter);
     if owners.is_empty() {
         return RoutePlan::Reject {
             status: 404,
@@ -399,7 +427,7 @@ fn route_to_owner(state: &AppState, model: &str) -> RoutePlan {
 }
 
 fn local_tags_response(state: &AppState, visible_key: Option<&KeyRecord>) -> RoutePlan {
-    let workers = connected_workers(state);
+    let workers = connected_workers_by_backend(state, WorkerBackendFilter::Ollama);
     if workers.is_empty() {
         return RoutePlan::Local(json_response(json!({ "models": [] })));
     }
@@ -426,7 +454,7 @@ fn local_tags_response(state: &AppState, visible_key: Option<&KeyRecord>) -> Rou
 }
 
 fn local_ps_response(state: &AppState, visible_key: Option<&KeyRecord>) -> RoutePlan {
-    let workers = connected_workers(state);
+    let workers = connected_workers_by_backend(state, WorkerBackendFilter::Ollama);
     if workers.is_empty() {
         return RoutePlan::Local(json_response(json!({ "models": [] })));
     }
@@ -458,7 +486,7 @@ fn local_ps_response(state: &AppState, visible_key: Option<&KeyRecord>) -> Route
 }
 
 fn local_version_response(state: &AppState) -> RoutePlan {
-    let workers = connected_workers(state);
+    let workers = connected_workers_by_backend(state, WorkerBackendFilter::Ollama);
     if workers.is_empty() {
         return RoutePlan::Local(json_response(json!({ "version": "unknown" })));
     }
@@ -485,7 +513,24 @@ fn connected_workers(state: &AppState) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn model_owners(state: &AppState, model: &str) -> Vec<String> {
+#[derive(Clone, Copy)]
+enum WorkerBackendFilter {
+    Any,
+    Ollama,
+    Vllm,
+}
+
+impl WorkerBackendFilter {
+    fn allows(self, backend: WorkerBackend) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Ollama => matches!(backend, WorkerBackend::OllamaLegacy | WorkerBackend::Ollama),
+            Self::Vllm => matches!(backend, WorkerBackend::Vllm),
+        }
+    }
+}
+
+fn connected_workers_by_backend(state: &AppState, filter: WorkerBackendFilter) -> Vec<String> {
     state
         .workers
         .read()
@@ -493,7 +538,32 @@ fn model_owners(state: &AppState, model: &str) -> Vec<String> {
         .map(|guard| {
             guard
                 .values()
-                .filter(|worker| worker.tags.iter().any(|tag| tag == model))
+                .filter(|worker| filter.allows(worker.backend))
+                .map(|worker| worker.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn route_to_any_backend(state: &AppState, filter: WorkerBackendFilter) -> RoutePlan {
+    let workers = connected_workers_by_backend(state, filter);
+    if workers.is_empty() {
+        return no_workers_available();
+    }
+    RoutePlan::QueueByNode(workers[0].clone())
+}
+
+fn model_owners(state: &AppState, model: &str, filter: WorkerBackendFilter) -> Vec<String> {
+    state
+        .workers
+        .read()
+        .ok()
+        .map(|guard| {
+            guard
+                .values()
+                .filter(|worker| {
+                    filter.allows(worker.backend) && worker.tags.iter().any(|tag| tag == model)
+                })
                 .map(|worker| worker.name.clone())
                 .collect::<Vec<_>>()
         })
@@ -605,11 +675,13 @@ mod tests {
     use std::sync::RwLock;
     use std::time::Instant;
 
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use uuid::Uuid;
 
     use crate::app::{AppState, Config};
+    use crate::servers::proxy::models::model_route_kind::ModelRouteKind;
     use crate::servers::proxy::models::route_plan::RoutePlan;
+    use crate::servers::worker::models::worker_backend::WorkerBackend;
     use crate::servers::worker::models::worker_phase::WorkerPhase;
     use crate::servers::worker::models::worker_status::WorkerStatus;
     use crate::shared::http::HttpRequest;
@@ -651,6 +723,7 @@ mod tests {
             nonce: "nonce".to_string(),
             hive_version: "0.1.0".to_string(),
             ollama_version: "0.1.0".to_string(),
+            backend: WorkerBackend::OllamaLegacy,
             tags: tags.into_iter().map(str::to_string).collect(),
             state: WorkerPhase::Polling,
             last_ping: Instant::now(),
@@ -670,7 +743,44 @@ mod tests {
         let (state, db) = test_state("generate")?;
         let req = request("POST", "/api/generate", br#"{"model":"llama3"}"#);
         match plan_request(&state, &req, None) {
-            RoutePlan::QueueByModel(model) => assert_eq!(model, "llama3"),
+            RoutePlan::QueueByModel { model, kind } => {
+                assert_eq!(model, "llama3");
+                assert_eq!(kind, ModelRouteKind::OllamaNative);
+            }
+            _ => panic!("expected model route"),
+        }
+        cleanup(&db);
+        Ok(())
+    }
+
+    #[test]
+    fn openai_chat_routes_as_openai_compatible_model_work() -> io::Result<()> {
+        let (state, db) = test_state("openai_chat")?;
+        let req = request(
+            "POST",
+            "/v1/chat/completions",
+            br#"{"model":"Qwen/Qwen3-8B"}"#,
+        );
+        match plan_request(&state, &req, None) {
+            RoutePlan::QueueByModel { model, kind } => {
+                assert_eq!(model, "Qwen/Qwen3-8B");
+                assert_eq!(kind, ModelRouteKind::OpenAiCompatible);
+            }
+            _ => panic!("expected model route"),
+        }
+        cleanup(&db);
+        Ok(())
+    }
+
+    #[test]
+    fn vllm_rerank_routes_as_vllm_specific_model_work() -> io::Result<()> {
+        let (state, db) = test_state("vllm_rerank")?;
+        let req = request("POST", "/rerank", br#"{"model":"reranker"}"#);
+        match plan_request(&state, &req, None) {
+            RoutePlan::QueueByModel { model, kind } => {
+                assert_eq!(model, "reranker");
+                assert_eq!(kind, ModelRouteKind::VllmSpecific);
+            }
             _ => panic!("expected model route"),
         }
         cleanup(&db);

@@ -11,9 +11,9 @@ use serde_json::json;
 
 use crate::app::AppState;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
-use crate::shared::capture::{CaptureCompressionReport, compress_capture_day};
+use crate::shared::capture::{compress_capture_day, CaptureCompressionReport};
 use crate::shared::log;
-use crate::shared::sqlite::usage_tracking::{DailyUsageRow, UsageTrackingDb, current_local_day};
+use crate::shared::sqlite::usage_tracking::{current_local_day, DailyUsageRow, UsageTrackingDb};
 
 pub fn run(state: Arc<AppState>) -> io::Result<()> {
     let Some(settings) = TelegramSettings::from_state(&state) else {
@@ -31,13 +31,8 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
     let mut current_day = current_local_day();
 
     loop {
-        if let Err(err) = send_daily_report_if_needed(
-            &client,
-            &db,
-            &state,
-            settings.user_id,
-            &mut current_day,
-        )
+        if let Err(err) =
+            send_daily_report_if_needed(&client, &db, &state, settings.user_id, &mut current_day)
         {
             log::warn(format!("telegram daily report failed: {err}"));
         }
@@ -228,8 +223,9 @@ fn workers_text(state: &AppState) -> String {
     let mut lines = vec![format!("Connected workers: {}", workers.len())];
     for worker in workers {
         lines.push(format!(
-            "{} | {} | models={}",
+            "{} | {} | {} | models={}",
             worker.name,
+            worker.backend.as_str(),
             worker_phase_name(worker.state),
             unique_tag_count(&worker.tags)
         ));
@@ -425,7 +421,9 @@ fn send_daily_report_if_needed(
     let capture_report = match compress_capture_day(&state.config.capture_dir, previous_day) {
         Ok(report) => report,
         Err(err) => {
-            log::warn(format!("capture compression failed for day={previous_day}: {err}"));
+            log::warn(format!(
+                "capture compression failed for day={previous_day}: {err}"
+            ));
             CaptureCompressionReport {
                 day: previous_day,
                 errors: vec![err.to_string()],
@@ -459,6 +457,9 @@ fn format_capture_compression_report(report: &CaptureCompressionReport) -> Strin
         format!("  Compressed: {}", format_bytes(report.compressed_bytes)),
         format!("  Saved: {}", format_signed_bytes(report.bytes_saved())),
     ];
+    if let Some(available) = report.disk_available_bytes {
+        lines.push(format!("  Disk free: {}", format_bytes(available)));
+    }
     if !report.errors.is_empty() {
         lines.push(format!("  Errors: {}", report.errors.len()));
         for error in report.errors.iter().take(3) {
@@ -553,6 +554,7 @@ mod tests {
             captures: 42,
             original_bytes: 4096,
             compressed_bytes: 1024,
+            disk_available_bytes: Some(10 * 1024 * 1024),
             errors: Vec::new(),
         });
 
@@ -563,5 +565,6 @@ mod tests {
         assert!(report.contains("  Original: 4.0 KB"));
         assert!(report.contains("  Compressed: 1.0 KB"));
         assert!(report.contains("  Saved: 3.0 KB"));
+        assert!(report.contains("  Disk free: 10.0 MB"));
     }
 }

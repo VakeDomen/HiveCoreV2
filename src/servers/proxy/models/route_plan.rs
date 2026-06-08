@@ -1,7 +1,12 @@
 use crate::shared::http::HttpResponse;
 
+use super::model_route_kind::ModelRouteKind;
+
 pub enum RoutePlan {
-    QueueByModel(String),
+    QueueByModel {
+        model: String,
+        kind: ModelRouteKind,
+    },
     QueueByNode(String),
     Local(HttpResponse),
     Reject {

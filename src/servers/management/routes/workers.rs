@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::app::AppState;
 use crate::shared::http::HttpResponse;
@@ -31,11 +31,21 @@ fn render_workers(state: &AppState) -> Value {
         .map(|guard| {
             guard
                 .values()
-                .map(|worker| (worker.name.clone(), json!([worker.state])))
+                .map(|worker| {
+                    (
+                        worker.name.clone(),
+                        json!({
+                            "state": worker.state,
+                            "backend": worker.backend.as_str()
+                        }),
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!(entries.into_iter().collect::<std::collections::HashMap<_, _>>())
+    json!(entries
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>())
 }
 
 fn render_worker_pings(state: &AppState) -> Value {
@@ -58,7 +68,9 @@ fn render_worker_pings(state: &AppState) -> Value {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!(entries.into_iter().collect::<std::collections::HashMap<_, _>>())
+    json!(entries
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>())
 }
 
 fn render_worker_tags(state: &AppState) -> Value {
@@ -73,7 +85,9 @@ fn render_worker_tags(state: &AppState) -> Value {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!(entries.into_iter().collect::<std::collections::HashMap<_, _>>())
+    json!(entries
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>())
 }
 
 fn render_worker_versions(state: &AppState) -> Value {
@@ -89,14 +103,17 @@ fn render_worker_versions(state: &AppState) -> Value {
                         worker.name.clone(),
                         json!({
                             "hive_version": worker.hive_version,
-                            "ollama_version": worker.ollama_version
+                            "ollama_version": worker.ollama_version,
+                            "backend": worker.backend.as_str()
                         }),
                     )
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!(entries.into_iter().collect::<std::collections::HashMap<_, _>>())
+    json!(entries
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>())
 }
 
 fn json_response(value: Value) -> HttpResponse {

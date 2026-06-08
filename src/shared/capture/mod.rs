@@ -104,6 +104,7 @@ pub struct CaptureCompressionReport {
     pub captures: u64,
     pub original_bytes: u64,
     pub compressed_bytes: u64,
+    pub disk_available_bytes: Option<u64>,
     pub errors: Vec<String>,
 }
 
@@ -188,6 +189,7 @@ pub fn compress_capture_day(
     let root = Path::new(capture_dir);
     let mut report = CaptureCompressionReport {
         day,
+        disk_available_bytes: disk_available_bytes(root).ok(),
         ..CaptureCompressionReport::default()
     };
     if !root.exists() {
@@ -199,7 +201,9 @@ pub fn compress_capture_day(
         let key_entry = match key_entry {
             Ok(entry) => entry,
             Err(err) => {
-                report.errors.push(format!("failed to read capture entry: {err}"));
+                report
+                    .errors
+                    .push(format!("failed to read capture entry: {err}"));
                 continue;
             }
         };
@@ -270,7 +274,9 @@ fn compress_capture_file(path: &Path, compressed_path: &Path) -> io::Result<Comp
         .status()
         .map_err(io::Error::other)?;
     if !status.success() {
-        return Err(io::Error::other(format!("gzip exited with status {status}")));
+        return Err(io::Error::other(format!(
+            "gzip exited with status {status}"
+        )));
     }
     let compressed_bytes = fs::metadata(compressed_path)?.len();
     Ok(CompressionSummary {
@@ -288,6 +294,32 @@ fn count_lines(path: &Path) -> io::Result<u64> {
         count += 1;
     }
     Ok(count)
+}
+
+fn disk_available_bytes(path: &Path) -> io::Result<u64> {
+    let output = Command::new("df")
+        .arg("-Pk")
+        .arg(path)
+        .output()
+        .map_err(io::Error::other)?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "df exited with status {}",
+            output.status
+        )));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text
+        .lines()
+        .nth(1)
+        .ok_or_else(|| io::Error::other("df output missing data row"))?;
+    let available_kb = line
+        .split_whitespace()
+        .nth(3)
+        .ok_or_else(|| io::Error::other("df output missing available column"))?
+        .parse::<u64>()
+        .map_err(io::Error::other)?;
+    Ok(available_kb * 1024)
 }
 
 fn sanitize_headers(headers: &HashMap<String, String>) -> HashMap<String, String> {
@@ -401,6 +433,7 @@ mod tests {
 
         assert_eq!(report.files_compressed, 1);
         assert_eq!(report.captures, 2);
+        assert!(report.disk_available_bytes.is_some());
         assert!(report.original_bytes > 0);
         assert!(report.compressed_bytes > 0);
         assert!(!dir.join("interactions.jsonl").exists());

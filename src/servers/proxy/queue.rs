@@ -2,17 +2,24 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use crate::servers::proxy::models::client_task::ClientTask;
+use crate::servers::proxy::models::model_route_kind::ModelRouteKind;
 use crate::servers::proxy::models::queue_snapshot::QueueSnapshot;
+use crate::servers::worker::models::worker_backend::WorkerBackend;
 use crate::shared::log;
 
 #[derive(Default)]
 pub struct RequestQueue {
-    model_queue: Mutex<HashMap<String, VecDeque<ClientTask>>>,
+    model_queue: Mutex<HashMap<ModelQueueKey, VecDeque<ClientTask>>>,
     node_queue: Mutex<HashMap<String, VecDeque<ClientTask>>>,
 }
 
 impl RequestQueue {
-    pub fn enqueue_model(&self, model: String, task: ClientTask) -> Result<(), &'static str> {
+    pub fn enqueue_model(
+        &self,
+        model: String,
+        kind: ModelRouteKind,
+        task: ClientTask,
+    ) -> Result<(), &'static str> {
         let mut guard = self
             .model_queue
             .lock()
@@ -21,11 +28,15 @@ impl RequestQueue {
         let request_id = task.id;
         let method = task.request.method.clone();
         let uri = task.request.uri.clone();
-        guard.entry(model).or_default().push_back(task);
+        guard
+            .entry(ModelQueueKey { model, kind })
+            .or_default()
+            .push_back(task);
         log::info(format!(
-            "queued request id={} route=model:{} method={} uri={}",
+            "queued request id={} route=model:{} kind={} method={} uri={}",
             log::bold(request_id.to_string()),
             log::bold(&queued_model),
+            log::bold(kind.as_str()),
             method,
             uri
         ));
@@ -49,7 +60,12 @@ impl RequestQueue {
         Ok(())
     }
 
-    pub fn dequeue_for_worker(&self, worker_name: &str, tags: &[String]) -> Option<ClientTask> {
+    pub fn dequeue_for_worker(
+        &self,
+        worker_name: &str,
+        backend: WorkerBackend,
+        tags: &[String],
+    ) -> Option<ClientTask> {
         if let Ok(mut node_guard) = self.node_queue.lock() {
             if let Some(queue) = node_guard.get_mut(worker_name) {
                 if let Some(task) = queue.pop_front() {
@@ -69,14 +85,19 @@ impl RequestQueue {
             return None;
         };
         for tag in tags {
-            if let Some(queue) = model_guard.get_mut(tag) {
+            let Some(key) = next_compatible_key(&model_guard, backend, tag) else {
+                continue;
+            };
+            if let Some(queue) = model_guard.get_mut(&key) {
                 if let Some(task) = queue.pop_front() {
                     let wait = log::format_duration(task.queue_wait());
                     log::info(format!(
-                        "dispatch request id={} worker={} route=model:{} wait={}",
+                        "dispatch request id={} worker={} backend={} route=model:{} kind={} wait={}",
                         log::bold(task.id.to_string()),
                         log::bold(worker_name),
+                        log::bold(backend.as_str()),
                         log::bold(tag),
+                        log::bold(key.kind.as_str()),
                         log::bold(wait)
                     ));
                     return Some(task);
@@ -102,7 +123,7 @@ impl RequestQueue {
             .map(|guard| {
                 guard
                     .iter()
-                    .map(|(k, v)| (k.clone(), v.len()))
+                    .map(|(k, v)| (k.display(), v.len()))
                     .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default();
@@ -122,5 +143,135 @@ impl RequestQueue {
             model_queue,
             node_queue,
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ModelQueueKey {
+    model: String,
+    kind: ModelRouteKind,
+}
+
+impl ModelQueueKey {
+    fn display(&self) -> String {
+        format!("{}:{}", self.kind.as_str(), self.model)
+    }
+}
+
+fn next_compatible_key(
+    queues: &HashMap<ModelQueueKey, VecDeque<ClientTask>>,
+    backend: WorkerBackend,
+    model: &str,
+) -> Option<ModelQueueKey> {
+    [
+        ModelRouteKind::OpenAiCompatible,
+        ModelRouteKind::OllamaNative,
+        ModelRouteKind::VllmSpecific,
+    ]
+    .into_iter()
+    .find_map(|kind| {
+        if !kind.compatible_with(backend) {
+            return None;
+        }
+        let key = ModelQueueKey {
+            model: model.to_string(),
+            kind,
+        };
+        queues
+            .get(&key)
+            .and_then(|queue| (!queue.is_empty()).then_some(key))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RequestQueue;
+    use crate::servers::proxy::models::client_task::{ClientTask, RequestContext};
+    use crate::servers::proxy::models::model_route_kind::ModelRouteKind;
+    use crate::servers::proxy::models::response_target::ResponseTarget;
+    use crate::servers::worker::models::worker_backend::WorkerBackend;
+    use crate::shared::http::HttpRequest;
+
+    fn task(uri: &str) -> ClientTask {
+        ClientTask::new(
+            HttpRequest {
+                method: "POST".to_string(),
+                uri: uri.to_string(),
+                protocol: "HTTP/1.1".to_string(),
+                headers: Default::default(),
+                body: Vec::new(),
+            },
+            ResponseTarget::Ignore,
+            RequestContext::default(),
+        )
+    }
+
+    #[test]
+    fn ollama_native_work_is_not_dequeued_by_vllm_workers() {
+        let queue = RequestQueue::default();
+        queue
+            .enqueue_model(
+                "llama3".to_string(),
+                ModelRouteKind::OllamaNative,
+                task("/api/generate"),
+            )
+            .expect("enqueue");
+
+        assert!(queue
+            .dequeue_for_worker("vllm", WorkerBackend::Vllm, &["llama3".to_string()])
+            .is_none());
+        assert!(queue
+            .dequeue_for_worker("ollama", WorkerBackend::Ollama, &["llama3".to_string()])
+            .is_some());
+    }
+
+    #[test]
+    fn openai_compatible_work_can_be_dequeued_by_any_backend() {
+        let queue = RequestQueue::default();
+        queue
+            .enqueue_model(
+                "llama3".to_string(),
+                ModelRouteKind::OpenAiCompatible,
+                task("/v1/chat/completions"),
+            )
+            .expect("enqueue");
+
+        assert!(queue
+            .dequeue_for_worker(
+                "ollama",
+                WorkerBackend::OllamaLegacy,
+                &["llama3".to_string()]
+            )
+            .is_some());
+
+        queue
+            .enqueue_model(
+                "llama3".to_string(),
+                ModelRouteKind::OpenAiCompatible,
+                task("/v1/chat/completions"),
+            )
+            .expect("enqueue");
+        assert!(queue
+            .dequeue_for_worker("vllm", WorkerBackend::Vllm, &["llama3".to_string()])
+            .is_some());
+    }
+
+    #[test]
+    fn vllm_specific_work_is_not_dequeued_by_ollama_workers() {
+        let queue = RequestQueue::default();
+        queue
+            .enqueue_model(
+                "reranker".to_string(),
+                ModelRouteKind::VllmSpecific,
+                task("/rerank"),
+            )
+            .expect("enqueue");
+
+        assert!(queue
+            .dequeue_for_worker("ollama", WorkerBackend::Ollama, &["reranker".to_string()])
+            .is_none());
+        assert!(queue
+            .dequeue_for_worker("vllm", WorkerBackend::Vllm, &["reranker".to_string()])
+            .is_some());
     }
 }

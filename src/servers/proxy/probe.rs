@@ -29,11 +29,7 @@ pub fn probe_worker_json(
     Some(value)
 }
 
-pub fn probe_worker_version(
-    state: &AppState,
-    worker: &str,
-    timeout: Duration,
-) -> Option<String> {
+pub fn probe_worker_version(state: &AppState, worker: &str, timeout: Duration) -> Option<String> {
     let request = HttpRequest {
         method: "GET".to_string(),
         uri: "/api/version".to_string(),
@@ -54,8 +50,15 @@ fn dispatch_capture(
     timeout: Duration,
 ) -> Option<WorkerHttpResponse> {
     let (tx, rx) = mpsc::channel();
-    let task = ClientTask::new(request, ResponseTarget::Capture(tx), RequestContext::default());
-    if let Err(err) = state.request_queue.enqueue_to_node(worker.to_string(), task) {
+    let task = ClientTask::new(
+        request,
+        ResponseTarget::Capture(tx),
+        RequestContext::default(),
+    );
+    if let Err(err) = state
+        .request_queue
+        .enqueue_to_node(worker.to_string(), task)
+    {
         log::warn(format!("failed to enqueue probe to worker={worker}: {err}"));
         return None;
     }
@@ -67,8 +70,10 @@ fn update_worker_cache(state: &AppState, worker: &str, uri: &str, value: &Value)
         if let Some(status) = guard.get_mut(worker) {
             match uri {
                 "/api/tags" => status.model_catalog = Some(value.clone()),
+                "/v1/models" => status.model_catalog = Some(value.clone()),
                 "/api/ps" => status.running_models = Some(value.clone()),
                 "/api/version" => status.version_payload = Some(value.clone()),
+                "/version" => status.version_payload = Some(value.clone()),
                 _ => {}
             }
         }
@@ -80,8 +85,10 @@ fn cached_value(state: &AppState, worker: &str, uri: &str) -> Option<Value> {
         let status = guard.get(worker)?;
         match uri {
             "/api/tags" => status.model_catalog.clone(),
+            "/v1/models" => status.model_catalog.clone(),
             "/api/ps" => status.running_models.clone(),
             "/api/version" => status.version_payload.clone(),
+            "/version" => status.version_payload.clone(),
             _ => None,
         }
     })

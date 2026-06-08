@@ -31,6 +31,23 @@ pub fn authorize_request(state: &AppState, request: &HttpRequest) -> Result<(), 
         }
     }
 
+    if admin_only_proxy_route(request) {
+        let Some(key) = verified_key.as_ref() else {
+            log::warn(format!(
+                "rejected admin-only proxy request without admin key method={} uri={}",
+                request.method, request.uri
+            ));
+            return Err(401);
+        };
+        if key.role != Role::Admin {
+            log::warn(format!(
+                "rejected admin-only proxy request for non-admin key={} method={} uri={}",
+                key.name, request.method, request.uri
+            ));
+            return Err(403);
+        }
+    }
+
     if let Some(key) = verified_key.as_ref() {
         for model in request_models(request) {
             if !key.allows_model(&model) {
@@ -44,6 +61,26 @@ pub fn authorize_request(state: &AppState, request: &HttpRequest) -> Result<(), 
     }
 
     Ok(())
+}
+
+fn admin_only_proxy_route(request: &HttpRequest) -> bool {
+    matches!(
+        (request.method.as_str(), request.uri.as_str()),
+        ("POST", "/api/create")
+            | ("POST", "/api/copy")
+            | ("POST", "/api/pull")
+            | ("POST", "/api/push")
+            | ("DELETE", "/api/delete")
+            | ("GET", "/load")
+            | ("GET", "/metrics")
+            | ("POST", "/v1/load_lora_adapter")
+            | ("POST", "/v1/unload_lora_adapter")
+            | ("POST", "/v1/lora_adapters")
+            | ("POST", "/start_profile")
+            | ("POST", "/stop_profile")
+            | ("POST", "/sleep")
+            | ("POST", "/wake_up")
+    )
 }
 
 pub fn authorized_key(state: &AppState, request: &HttpRequest) -> Option<KeyRecord> {
@@ -60,8 +97,17 @@ fn request_models(request: &HttpRequest) -> Vec<String> {
         | ("POST", "/api/embed")
         | ("POST", "/api/embeddings")
         | ("POST", "/v1/chat/completions")
+        | ("POST", "/v1/chat/completions/batch")
         | ("POST", "/v1/completions")
         | ("POST", "/v1/embeddings")
+        | ("POST", "/v2/embed")
+        | ("POST", "/score")
+        | ("POST", "/v1/score")
+        | ("POST", "/rerank")
+        | ("POST", "/v1/rerank")
+        | ("POST", "/v2/rerank")
+        | ("POST", "/tokenize")
+        | ("POST", "/detokenize")
         | ("POST", "/api/show")
         | ("POST", "/api/pull")
         | ("POST", "/api/push")

@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use serde_json::Value;
 
+use crate::servers::worker::models::worker_backend::WorkerBackend;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
 
 #[derive(Clone)]
@@ -10,6 +11,7 @@ pub struct WorkerStatus {
     pub nonce: String,
     pub hive_version: String,
     pub ollama_version: String,
+    pub backend: WorkerBackend,
     pub tags: Vec<String>,
     pub state: WorkerPhase,
     pub last_ping: Instant,

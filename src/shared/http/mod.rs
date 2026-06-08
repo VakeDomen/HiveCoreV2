@@ -50,8 +50,17 @@ pub fn request_usage_model_name(request: &HttpRequest) -> Option<String> {
         | ("POST", "/api/embed")
         | ("POST", "/api/embeddings")
         | ("POST", "/v1/chat/completions")
+        | ("POST", "/v1/chat/completions/batch")
         | ("POST", "/v1/completions")
-        | ("POST", "/v1/embeddings") => extract_json_value(&request.body, "model"),
+        | ("POST", "/v1/embeddings")
+        | ("POST", "/v2/embed")
+        | ("POST", "/score")
+        | ("POST", "/v1/score")
+        | ("POST", "/rerank")
+        | ("POST", "/v1/rerank")
+        | ("POST", "/v2/rerank")
+        | ("POST", "/tokenize")
+        | ("POST", "/detokenize") => extract_json_value(&request.body, "model"),
         _ => None,
     }
 }
@@ -111,6 +120,18 @@ pub fn request_model_name(request: &HttpRequest) -> Option<String> {
         | ("POST", "/api/chat")
         | ("POST", "/api/embed")
         | ("POST", "/api/embeddings")
+        | ("POST", "/v1/chat/completions")
+        | ("POST", "/v1/chat/completions/batch")
+        | ("POST", "/v1/completions")
+        | ("POST", "/v1/embeddings")
+        | ("POST", "/v2/embed")
+        | ("POST", "/score")
+        | ("POST", "/v1/score")
+        | ("POST", "/rerank")
+        | ("POST", "/v1/rerank")
+        | ("POST", "/v2/rerank")
+        | ("POST", "/tokenize")
+        | ("POST", "/detokenize")
         | ("POST", "/api/show")
         | ("POST", "/api/pull")
         | ("POST", "/api/push")
@@ -395,6 +416,22 @@ mod tests {
         assert_eq!(
             request_usage_model_name(&chat_request).as_deref(),
             Some("llama3")
+        );
+    }
+
+    #[test]
+    fn resolves_usage_model_name_for_vllm_model_routes() {
+        let request = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/rerank".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers: Default::default(),
+            body: br#"{"model":"reranker"}"#.to_vec(),
+        };
+
+        assert_eq!(
+            request_usage_model_name(&request).as_deref(),
+            Some("reranker")
         );
     }
 
