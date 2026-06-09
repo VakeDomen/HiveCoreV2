@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::auth::{KeyRecord, Role};
+use crate::servers::management::models::key_delete_request::KeyDeleteRequest;
 use crate::servers::management::models::key_request::KeyRequest;
 use crate::servers::management::models::key_update_request::KeyUpdateRequest;
 use crate::shared::http::{HttpRequest, HttpResponse};
@@ -112,6 +113,25 @@ pub fn patch_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
                 (500, "Internal Server Error")
             };
             HttpResponse::new(status.0, status.1, Vec::new())
+        }
+    }
+}
+
+pub fn delete_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
+    let payload = match serde_json::from_slice::<KeyDeleteRequest>(&request.body) {
+        Ok(payload) => payload,
+        Err(err) => {
+            log::warn(format!("invalid key delete request json: {err}"));
+            return HttpResponse::new(400, "Bad Request", b"Invalid JSON body".to_vec());
+        }
+    };
+
+    match state.keys.delete(payload.id) {
+        Ok(true) => HttpResponse::new(204, "No Content", Vec::new()),
+        Ok(false) => HttpResponse::new(404, "Not Found", Vec::new()),
+        Err(err) => {
+            log::warn(format!("failed to delete key id={} error={err}", payload.id));
+            HttpResponse::new(500, "Internal Server Error", Vec::new())
         }
     }
 }

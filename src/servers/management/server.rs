@@ -57,6 +57,7 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         ("GET", "/key") => routes::keys::get_keys(&state),
         ("POST", "/key") => routes::keys::post_key(&state, &request),
         ("PATCH", "/key") => routes::keys::patch_key(&state, &request),
+        ("DELETE", "/key") => routes::keys::delete_key(&state, &request),
         ("POST", "/worker/command") => {
             routes::worker_command::post_worker_command(&state, &request)
         }

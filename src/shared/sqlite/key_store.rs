@@ -85,6 +85,7 @@ impl SqliteKeyStore {
             .prepare(
                 "SELECT id, name, value, role, capture
                  FROM keys
+                 WHERE deleted = 0
                  ORDER BY id ASC",
             )
             .map_err(to_io_error)?;
@@ -125,7 +126,7 @@ impl SqliteKeyStore {
             .prepare(
                 "SELECT id, name, value, role, capture
                  FROM keys
-                 WHERE value = ?1",
+                 WHERE value = ?1 AND deleted = 0",
             )
             .map_err(to_io_error)?;
         let record = statement
@@ -191,6 +192,20 @@ impl SqliteKeyStore {
         transaction.commit().map_err(to_io_error)?;
         Ok(record)
     }
+
+    pub fn delete_key(&self, id: i64) -> io::Result<bool> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| io::Error::other("key database mutex poisoned"))?;
+        let changed = connection
+            .execute(
+                "UPDATE keys SET deleted = 1 WHERE id = ?1 AND deleted = 0",
+                params![id],
+            )
+            .map_err(to_io_error)?;
+        Ok(changed > 0)
+    }
 }
 
 fn initialize_schema(connection: &Connection) -> Result<(), SqlError> {
@@ -201,7 +216,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), SqlError> {
              name TEXT NOT NULL UNIQUE,
              value TEXT NOT NULL UNIQUE,
              role TEXT NOT NULL,
-             capture INTEGER NOT NULL DEFAULT 0
+             capture INTEGER NOT NULL DEFAULT 0,
+             deleted INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS key_model_rules (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,7 +230,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), SqlError> {
          CREATE INDEX IF NOT EXISTS idx_key_model_rules_lookup
              ON key_model_rules (key_id, list_type, model);",
     )?;
-    ensure_keys_capture_column(connection)
+    ensure_keys_capture_column(connection)?;
+    ensure_keys_deleted_column(connection)
 }
 
 fn count_keys(connection: &Connection) -> Result<i64, SqlError> {
@@ -248,11 +265,37 @@ fn ensure_keys_capture_column(connection: &Connection) -> Result<(), SqlError> {
     Ok(())
 }
 
+fn ensure_keys_deleted_column(connection: &Connection) -> Result<(), SqlError> {
+    if table_has_column(connection, "keys", "deleted")? {
+        return Ok(());
+    }
+    connection.execute(
+        "ALTER TABLE keys ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
+        [],
+    )?;
+    Ok(())
+}
+
+fn table_has_column(
+    connection: &Connection,
+    table: &str,
+    column_name: &str,
+) -> Result<bool, SqlError> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == column_name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn fetch_key_by_id(connection: &Connection, id: i64) -> Result<Option<KeyRecord>, SqlError> {
     let mut statement = connection.prepare(
         "SELECT id, name, value, role, capture
          FROM keys
-         WHERE id = ?1",
+         WHERE id = ?1 AND deleted = 0",
     )?;
     let record = statement
         .query_row(params![id], |row| {

@@ -84,6 +84,14 @@ impl KeyStore {
         Ok(record)
     }
 
+    pub fn delete(&self, id: i64) -> io::Result<bool> {
+        let deleted = self.database.delete_key(id)?;
+        if deleted {
+            self.refresh_cache()?;
+        }
+        Ok(deleted)
+    }
+
     fn refresh_cache(&self) -> io::Result<()> {
         let records = self.list()?;
         let cache = records
@@ -356,6 +364,50 @@ mod tests {
             result,
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists
         ));
+
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_removes_key_from_database_and_cache() -> io::Result<()> {
+        let path = temp_db_path("delete_key");
+        let store = KeyStore::new(path.to_str().expect("utf8 path"))?;
+        let token = Uuid::new_v4().to_string();
+        let inserted = store.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            false,
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        assert!(store.verify(&token, &[Role::Client]).is_some());
+        assert!(store.delete(inserted.id)?);
+        assert!(store.verify(&token, &[Role::Client]).is_none());
+        assert!(!store.list()?.iter().any(|key| key.id == inserted.id));
+
+        let connection = Connection::open(&path).map_err(io::Error::other)?;
+        let deleted: bool = connection
+            .query_row(
+                "SELECT deleted FROM keys WHERE id = ?1",
+                params![inserted.id],
+                |row| row.get(0),
+            )
+            .map_err(io::Error::other)?;
+        assert!(deleted);
+
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_returns_false_for_unknown_key() -> io::Result<()> {
+        let path = temp_db_path("delete_missing_key");
+        let store = KeyStore::new(path.to_str().expect("utf8 path"))?;
+
+        assert!(!store.delete(999_999)?);
 
         cleanup(&path);
         Ok(())
