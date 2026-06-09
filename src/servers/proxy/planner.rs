@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::app::AppState;
 use crate::auth::KeyRecord;
@@ -145,7 +145,7 @@ fn classify_endpoint(request: &HttpRequest) -> ProxyEndpoint {
             return ProxyEndpoint::VllmRerank;
         }
         ("POST", "/tokenize") | ("POST", "/detokenize") => {
-            return ProxyEndpoint::VllmModelFieldRoute
+            return ProxyEndpoint::VllmModelFieldRoute;
         }
         ("GET", "/tokenizer_info")
         | ("GET", "/version")
@@ -675,7 +675,7 @@ mod tests {
     use std::sync::RwLock;
     use std::time::Instant;
 
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use uuid::Uuid;
 
     use crate::app::{AppState, Config};

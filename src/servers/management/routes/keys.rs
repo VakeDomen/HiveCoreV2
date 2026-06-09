@@ -130,7 +130,10 @@ pub fn delete_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
         Ok(true) => HttpResponse::new(204, "No Content", Vec::new()),
         Ok(false) => HttpResponse::new(404, "Not Found", Vec::new()),
         Err(err) => {
-            log::warn(format!("failed to delete key id={} error={err}", payload.id));
+            log::warn(format!(
+                "failed to delete key id={} error={err}",
+                payload.id
+            ));
             HttpResponse::new(500, "Internal Server Error", Vec::new())
         }
     }

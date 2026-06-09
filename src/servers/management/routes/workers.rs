@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::app::AppState;
 use crate::shared::http::HttpResponse;
@@ -43,9 +43,11 @@ fn render_workers(state: &AppState) -> Value {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!(entries
-        .into_iter()
-        .collect::<std::collections::HashMap<_, _>>())
+    json!(
+        entries
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>()
+    )
 }
 
 fn render_worker_pings(state: &AppState) -> Value {
@@ -68,9 +70,11 @@ fn render_worker_pings(state: &AppState) -> Value {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!(entries
-        .into_iter()
-        .collect::<std::collections::HashMap<_, _>>())
+    json!(
+        entries
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>()
+    )
 }
 
 fn render_worker_tags(state: &AppState) -> Value {
@@ -85,9 +89,11 @@ fn render_worker_tags(state: &AppState) -> Value {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!(entries
-        .into_iter()
-        .collect::<std::collections::HashMap<_, _>>())
+    json!(
+        entries
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>()
+    )
 }
 
 fn render_worker_versions(state: &AppState) -> Value {
@@ -111,9 +117,11 @@ fn render_worker_versions(state: &AppState) -> Value {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    json!(entries
-        .into_iter()
-        .collect::<std::collections::HashMap<_, _>>())
+    json!(
+        entries
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>()
+    )
 }
 
 fn json_response(value: Value) -> HttpResponse {

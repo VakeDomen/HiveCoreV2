@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Local, NaiveDate, SecondsFormat, Utc};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::shared::http::HttpRequest;
 use crate::shared::log;

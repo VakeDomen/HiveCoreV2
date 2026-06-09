@@ -538,8 +538,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )?;
-        let request =
-            request_with_auth_to("POST", "/sleep", Some(&token), br#"{"level":1}"#);
+        let request = request_with_auth_to("POST", "/sleep", Some(&token), br#"{"level":1}"#);
 
         assert_eq!(authorize_request(&state, &request), Err(403));
 
@@ -559,12 +558,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )?;
-        let request = request_with_auth_to(
-            "GET",
-            "/load",
-            Some(&token),
-            b"",
-        );
+        let request = request_with_auth_to("GET", "/load", Some(&token), b"");
 
         assert_eq!(authorize_request(&state, &request), Ok(()));
 

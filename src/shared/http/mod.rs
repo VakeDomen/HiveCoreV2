@@ -17,6 +17,7 @@ pub struct TokenUsage {
 /// Usage event sent to the stats worker via the mpsc channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UsageEvent {
+    pub key_id: Option<i64>,
     pub key_name: String,
     pub model: String,
     pub prompt_tokens: u64,
@@ -332,8 +333,8 @@ pub fn extract_json_value(body: &[u8], field: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_openai_stream_usage, parse_usage_json, request_model_name, request_usage_model_name,
-        HttpRequest, TokenUsage,
+        HttpRequest, TokenUsage, ensure_openai_stream_usage, parse_usage_json, request_model_name,
+        request_usage_model_name,
     };
 
     #[test]

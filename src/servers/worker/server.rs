@@ -12,12 +12,12 @@ use crate::servers::worker::models::worker_backend::WorkerBackend;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
 use crate::servers::worker::models::worker_status::WorkerStatus;
 use crate::shared::capture::{
-    capture_body, capture_request, redact_embedding_vectors, utc_now, CaptureEvent, CaptureTiming,
-    CapturedBody, CapturedResponse, CapturedStreamEvent, ResponseTransfer,
+    CaptureEvent, CaptureTiming, CapturedBody, CapturedResponse, CapturedStreamEvent,
+    ResponseTransfer, capture_body, capture_request, redact_embedding_vectors, utc_now,
 };
 use crate::shared::http::{
-    read_request_from_reader, serialize_request, write_framed_request, HttpRequest, TokenUsage,
-    UsageEvent,
+    HttpRequest, TokenUsage, UsageEvent, read_request_from_reader, serialize_request,
+    write_framed_request,
 };
 use crate::shared::log;
 
@@ -324,6 +324,7 @@ fn handle_poll(
                 .as_secs();
 
             let usage_event = UsageEvent {
+                key_id: task.context.key_id,
                 key_name,
                 model,
                 prompt_tokens: tu.prompt_tokens,
@@ -806,8 +807,8 @@ mod tests {
     use crate::shared::http::TokenUsage;
 
     use super::{
-        parse_chunk_size, proxy_worker_response, proxy_worker_response_with_capture,
-        ResponseCaptureBuilder,
+        ResponseCaptureBuilder, parse_chunk_size, proxy_worker_response,
+        proxy_worker_response_with_capture,
     };
 
     #[test]

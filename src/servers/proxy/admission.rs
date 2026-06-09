@@ -1,6 +1,6 @@
 use crate::app::AppState;
 use crate::auth::{KeyRecord, Role};
-use crate::shared::http::{extract_json_value, HttpRequest};
+use crate::shared::http::{HttpRequest, extract_json_value};
 use crate::shared::log;
 
 pub fn authorize_request(state: &AppState, request: &HttpRequest) -> Result<(), u16> {

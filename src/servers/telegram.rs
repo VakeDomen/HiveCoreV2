@@ -11,9 +11,9 @@ use serde_json::json;
 
 use crate::app::AppState;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
-use crate::shared::capture::{compress_capture_day, CaptureCompressionReport};
+use crate::shared::capture::{CaptureCompressionReport, compress_capture_day};
 use crate::shared::log;
-use crate::shared::sqlite::usage_tracking::{current_local_day, DailyUsageRow, UsageTrackingDb};
+use crate::shared::sqlite::usage_tracking::{DailyUsageRow, UsageTrackingDb, current_local_day};
 
 pub fn run(state: Arc<AppState>) -> io::Result<()> {
     let Some(settings) = TelegramSettings::from_state(&state) else {
@@ -527,6 +527,7 @@ mod tests {
         let report = format_usage_report(
             NaiveDate::from_ymd_opt(2026, 4, 28).expect("valid date"),
             &[DailyUsageRow {
+                key_id: Some(1),
                 key_name: "alice".to_string(),
                 model: "bge-m3".to_string(),
                 request_count: 2,

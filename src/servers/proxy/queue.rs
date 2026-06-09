@@ -217,12 +217,16 @@ mod tests {
             )
             .expect("enqueue");
 
-        assert!(queue
-            .dequeue_for_worker("vllm", WorkerBackend::Vllm, &["llama3".to_string()])
-            .is_none());
-        assert!(queue
-            .dequeue_for_worker("ollama", WorkerBackend::Ollama, &["llama3".to_string()])
-            .is_some());
+        assert!(
+            queue
+                .dequeue_for_worker("vllm", WorkerBackend::Vllm, &["llama3".to_string()])
+                .is_none()
+        );
+        assert!(
+            queue
+                .dequeue_for_worker("ollama", WorkerBackend::Ollama, &["llama3".to_string()])
+                .is_some()
+        );
     }
 
     #[test]
@@ -236,13 +240,15 @@ mod tests {
             )
             .expect("enqueue");
 
-        assert!(queue
-            .dequeue_for_worker(
-                "ollama",
-                WorkerBackend::OllamaLegacy,
-                &["llama3".to_string()]
-            )
-            .is_some());
+        assert!(
+            queue
+                .dequeue_for_worker(
+                    "ollama",
+                    WorkerBackend::OllamaLegacy,
+                    &["llama3".to_string()]
+                )
+                .is_some()
+        );
 
         queue
             .enqueue_model(
@@ -251,9 +257,11 @@ mod tests {
                 task("/v1/chat/completions"),
             )
             .expect("enqueue");
-        assert!(queue
-            .dequeue_for_worker("vllm", WorkerBackend::Vllm, &["llama3".to_string()])
-            .is_some());
+        assert!(
+            queue
+                .dequeue_for_worker("vllm", WorkerBackend::Vllm, &["llama3".to_string()])
+                .is_some()
+        );
     }
 
     #[test]
@@ -267,11 +275,15 @@ mod tests {
             )
             .expect("enqueue");
 
-        assert!(queue
-            .dequeue_for_worker("ollama", WorkerBackend::Ollama, &["reranker".to_string()])
-            .is_none());
-        assert!(queue
-            .dequeue_for_worker("vllm", WorkerBackend::Vllm, &["reranker".to_string()])
-            .is_some());
+        assert!(
+            queue
+                .dequeue_for_worker("ollama", WorkerBackend::Ollama, &["reranker".to_string()])
+                .is_none()
+        );
+        assert!(
+            queue
+                .dequeue_for_worker("vllm", WorkerBackend::Vllm, &["reranker".to_string()])
+                .is_some()
+        );
     }
 }
