@@ -157,21 +157,39 @@ impl SqliteKeyStore {
         Ok(Some(record))
     }
 
-    pub fn update_key_capture(&self, id: i64, capture: bool) -> io::Result<Option<KeyRecord>> {
-        let connection = self
+    pub fn update_key(
+        &self,
+        id: i64,
+        name: Option<String>,
+        capture: Option<bool>,
+    ) -> io::Result<Option<KeyRecord>> {
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| io::Error::other("key database mutex poisoned"))?;
-        let changed = connection
-            .execute(
-                "UPDATE keys SET capture = ?1 WHERE id = ?2",
-                params![capture, id],
-            )
-            .map_err(to_io_error)?;
-        if changed == 0 {
+        let transaction = connection.transaction().map_err(to_io_error)?;
+        if fetch_key_by_id(&transaction, id)
+            .map_err(to_io_error)?
+            .is_none()
+        {
             return Ok(None);
         }
-        fetch_key_by_id(&connection, id).map_err(to_io_error)
+        if let Some(name) = name {
+            transaction
+                .execute("UPDATE keys SET name = ?1 WHERE id = ?2", params![name, id])
+                .map_err(to_io_error)?;
+        }
+        if let Some(capture) = capture {
+            transaction
+                .execute(
+                    "UPDATE keys SET capture = ?1 WHERE id = ?2",
+                    params![capture, id],
+                )
+                .map_err(to_io_error)?;
+        }
+        let record = fetch_key_by_id(&transaction, id).map_err(to_io_error)?;
+        transaction.commit().map_err(to_io_error)?;
+        Ok(record)
     }
 }
 

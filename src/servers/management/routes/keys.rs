@@ -83,15 +83,35 @@ pub fn patch_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
         }
     };
 
-    match state.keys.update_capture(payload.id, payload.capture) {
+    let name = match payload.name {
+        Some(name) => {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return HttpResponse::new(400, "Bad Request", b"Key name cannot be empty".to_vec());
+            }
+            Some(trimmed.to_string())
+        }
+        None => None,
+    };
+
+    if name.is_none() && payload.capture.is_none() {
+        return HttpResponse::new(400, "Bad Request", b"No key updates provided".to_vec());
+    }
+
+    match state.keys.update_key(payload.id, name, payload.capture) {
         Ok(Some(record)) => json_response(200, "OK", json!(KeyResponse::from(record))),
         Ok(None) => HttpResponse::new(404, "Not Found", Vec::new()),
         Err(err) => {
             log::warn(format!(
-                "failed to update key id={} capture={} error={err}",
-                payload.id, payload.capture
+                "failed to update key id={} error={err}",
+                payload.id
             ));
-            HttpResponse::new(500, "Internal Server Error", Vec::new())
+            let status = if err.kind() == io::ErrorKind::AlreadyExists {
+                (409, "Conflict")
+            } else {
+                (500, "Internal Server Error")
+            };
+            HttpResponse::new(status.0, status.1, Vec::new())
         }
     }
 }

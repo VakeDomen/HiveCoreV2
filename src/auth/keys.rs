@@ -73,8 +73,13 @@ impl KeyStore {
         self.database.list_keys()
     }
 
-    pub fn update_capture(&self, id: i64, capture: bool) -> io::Result<Option<KeyRecord>> {
-        let record = self.database.update_key_capture(id, capture)?;
+    pub fn update_key(
+        &self,
+        id: i64,
+        name: Option<String>,
+        capture: Option<bool>,
+    ) -> io::Result<Option<KeyRecord>> {
+        let record = self.database.update_key(id, name, capture)?;
         self.refresh_cache()?;
         Ok(record)
     }
@@ -286,13 +291,71 @@ mod tests {
 
         assert!(!inserted.capture);
         let updated = store
-            .update_capture(inserted.id, true)?
+            .update_key(inserted.id, None, Some(true))?
             .expect("key should exist");
         assert!(updated.capture);
         let verified = store
             .verify(&token, &[Role::Client])
             .expect("key should verify");
         assert!(verified.capture);
+
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn update_key_renames_key_and_refreshes_cache() -> io::Result<()> {
+        let path = temp_db_path("rename_key");
+        let store = KeyStore::new(path.to_str().expect("utf8 path"))?;
+        let token = Uuid::new_v4().to_string();
+        let inserted = store.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            false,
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        let updated = store
+            .update_key(inserted.id, Some("bob".to_string()), None)?
+            .expect("key should exist");
+        assert_eq!(updated.name, "bob");
+        let verified = store
+            .verify(&token, &[Role::Client])
+            .expect("key should verify");
+        assert_eq!(verified.name, "bob");
+
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn update_key_rejects_duplicate_name() -> io::Result<()> {
+        let path = temp_db_path("rename_duplicate");
+        let store = KeyStore::new(path.to_str().expect("utf8 path"))?;
+        let first = store.insert(
+            Uuid::new_v4().to_string(),
+            Role::Client,
+            "alice".to_string(),
+            false,
+            Vec::new(),
+            Vec::new(),
+        )?;
+        store.insert(
+            Uuid::new_v4().to_string(),
+            Role::Client,
+            "bob".to_string(),
+            false,
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        let result = store.update_key(first.id, Some("bob".to_string()), None);
+        assert!(matches!(
+            result,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists
+        ));
 
         cleanup(&path);
         Ok(())
