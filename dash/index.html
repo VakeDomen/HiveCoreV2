@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HiveCore Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <section id="login-screen" class="login-screen">
+      <div class="login-card">
+        <div class="brand login-brand">
+          <div class="brand-mark">H</div>
+          <div>
+            <h1>HiveCore</h1>
+            <p>Dashboard login</p>
+          </div>
+        </div>
+
+        <form id="login-form" class="login-panel">
+          <label for="key-input">Hive key</label>
+          <div class="token-row">
+            <input id="key-input" type="password" autocomplete="current-password" />
+            <button id="toggle-key" class="icon-button" type="button" title="Show key">👁</button>
+          </div>
+          <button class="primary" type="submit">Connect</button>
+        </form>
+
+        <div class="connection">
+          <div>
+            <span>Proxy</span>
+            <code id="login-proxy-endpoint">-</code>
+          </div>
+          <div>
+            <span>Management</span>
+            <code id="login-management-endpoint">-</code>
+          </div>
+        </div>
+
+        <section id="login-status-line" class="status-line">Enter a key to connect.</section>
+      </div>
+    </section>
+
+    <div id="dashboard-shell" class="shell hidden">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">H</div>
+          <div>
+            <h1>HiveCore</h1>
+            <p>Admin dashboard</p>
+          </div>
+        </div>
+
+        <button id="logout-button" class="secondary" type="button">Change key</button>
+
+        <div class="connection">
+          <div>
+            <span>Proxy</span>
+            <code id="proxy-endpoint">-</code>
+          </div>
+          <div>
+            <span>Management</span>
+            <code id="management-endpoint">-</code>
+          </div>
+        </div>
+
+        <nav>
+          <button class="nav-button active" data-view="overview">Overview</button>
+          <button class="nav-button" data-view="models">Models</button>
+          <button class="nav-button admin-only" data-view="keys">Keys</button>
+          <button class="nav-button admin-only" data-view="workers">Workers</button>
+          <button class="nav-button" data-view="api">API</button>
+        </nav>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <p id="role-pill" class="pill">Disconnected</p>
+            <h2 id="page-title">Overview</h2>
+          </div>
+          <div class="actions">
+            <label class="refresh-control">
+              Refresh
+              <select id="refresh-interval">
+                <option value="0">Off</option>
+                <option value="5000" selected>5s</option>
+                <option value="10000">10s</option>
+                <option value="30000">30s</option>
+              </select>
+            </label>
+            <button id="refresh-button" class="secondary" type="button">Refresh</button>
+          </div>
+        </header>
+
+        <section id="status-line" class="status-line">Enter a key to connect.</section>
+
+        <section id="overview-view" class="view active">
+          <div class="metric-grid">
+            <article class="metric">
+              <span>Role</span>
+              <strong id="metric-role">-</strong>
+            </article>
+            <article class="metric">
+              <span>Workers</span>
+              <strong id="metric-workers">-</strong>
+            </article>
+            <article class="metric">
+              <span>Visible models</span>
+              <strong id="metric-models">-</strong>
+            </article>
+            <article class="metric">
+              <span>Queued</span>
+              <strong id="metric-queued">-</strong>
+            </article>
+          </div>
+
+          <div class="panel-grid">
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Workers</h3>
+              </div>
+              <div id="overview-workers" class="overview-list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Queues</h3>
+              </div>
+              <div id="overview-queues" class="overview-list"></div>
+            </section>
+          </div>
+
+          <div class="panel-grid overview-lower">
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Backends</h3>
+              </div>
+              <div id="overview-backends" class="overview-list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Models</h3>
+              </div>
+              <div id="overview-models" class="overview-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="models-view" class="view">
+          <section class="panel model-console">
+            <div class="panel-head">
+              <div>
+                <h3 id="model-console-title">Select a model</h3>
+                <p id="model-console-subtitle" class="panel-subtitle">Choose a model from either list.</p>
+              </div>
+              <select id="model-console-mode" disabled>
+                <option value="chat">Chat</option>
+                <option value="embedding">Embedding</option>
+              </select>
+            </div>
+            <form id="prompt-form" class="prompt-form">
+              <label>
+                Input
+                <textarea id="prompt-text" rows="5">Write one short sentence about distributed inference routing.</textarea>
+              </label>
+              <div class="prompt-actions">
+                <button id="model-run-button" class="primary" type="submit" disabled>Run</button>
+              </div>
+            </form>
+            <div id="prompt-output" class="response-box empty">Response will appear here.</div>
+          </section>
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Ollama Tags</h3>
+                <button class="small" data-action="load-ollama-tags">Load</button>
+              </div>
+              <div id="ollama-models" class="list-empty">No data loaded.</div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>OpenAI Models</h3>
+                <button class="small" data-action="load-openai-models">Load</button>
+              </div>
+              <div id="openai-models" class="list-empty">No data loaded.</div>
+            </section>
+          </div>
+        </section>
+
+        <section id="keys-view" class="view">
+          <div class="panel">
+            <div class="panel-head">
+              <h3>Keys</h3>
+              <button class="small" data-action="load-keys">Reload</button>
+            </div>
+            <div class="tabs" id="key-role-tabs">
+              <button class="tab active" type="button" data-role-filter="all">All</button>
+              <button class="tab" type="button" data-role-filter="Admin">Admin</button>
+              <button class="tab" type="button" data-role-filter="Client">Client</button>
+              <button class="tab" type="button" data-role-filter="Worker">Worker</button>
+            </div>
+            <form id="create-key-form" class="inline-form">
+              <input id="new-key-name" placeholder="name" />
+              <select id="new-key-role">
+                <option value="Client">client</option>
+                <option value="Worker">worker</option>
+                <option value="Admin">admin</option>
+              </select>
+              <label class="check"><input id="new-key-capture" type="checkbox" checked /> capture</label>
+              <input id="new-key-whitelist" placeholder="whitelist, comma separated" />
+              <input id="new-key-blacklist" placeholder="blacklist, comma separated" />
+              <button class="primary" type="submit">Create</button>
+            </form>
+            <div id="created-token" class="created-token"></div>
+            <div id="keys-table" class="table-wrap"></div>
+          </div>
+        </section>
+
+        <section id="workers-view" class="view">
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Workers</h3>
+                <button class="small" data-action="load-workers">Reload</button>
+              </div>
+              <div id="workers-grid" class="worker-grid"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Queue</h3>
+                <button class="small" data-action="load-queue">Reload</button>
+              </div>
+              <pre id="queue-json" class="json-box">{}</pre>
+            </section>
+          </div>
+          <section class="panel">
+            <div class="panel-head">
+              <h3>Worker Command</h3>
+            </div>
+            <form id="worker-command-form" class="inline-form compact">
+              <input id="command-worker" placeholder="worker name" />
+              <select id="command-name">
+                <option value="REBOOT">REBOOT</option>
+                <option value="SHUTDOWN">SHUTDOWN</option>
+                <option value="UPDATE">UPDATE_OLLAMA</option>
+              </select>
+              <button class="danger" type="submit">Send</button>
+            </form>
+          </section>
+        </section>
+
+        <section id="api-view" class="view">
+          <div id="api-surface" class="api-grid"></div>
+        </section>
+      </main>
+    </div>
+
+    <template id="empty-template">
+      <div class="list-empty">No records.</div>
+    </template>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

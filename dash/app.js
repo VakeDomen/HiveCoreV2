@@ -1,0 +1,1075 @@
+const state = {
+  config: null,
+  key: "",
+  role: "disconnected",
+  admin: false,
+  selectedModel: null,
+  keyRoleFilter: "all",
+  refreshTimer: null,
+  refreshIntervalMs: 0,
+  data: {
+    keys: [],
+    workers: {},
+    connections: {},
+    pings: {},
+    tags: {},
+    versions: {},
+    queue: null,
+    ollamaTags: null,
+    openaiModels: null,
+  },
+};
+
+const $ = (selector) => document.querySelector(selector);
+const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
+const apiSurface = [
+  {
+    title: "Management",
+    endpoints: [
+      ["GET", "/queue", "admin"],
+      ["GET", "/worker/status", "admin"],
+      ["GET", "/worker/connections", "admin"],
+      ["GET", "/worker/pings", "admin"],
+      ["GET", "/worker/tags", "admin"],
+      ["GET", "/worker/versions", "admin"],
+      ["GET", "/key", "admin"],
+      ["POST", "/key", "admin"],
+      ["PATCH", "/key", "admin"],
+      ["DELETE", "/key", "admin"],
+      ["POST", "/worker/command", "admin"],
+    ],
+  },
+  {
+    title: "Ollama Proxy",
+    endpoints: [
+      ["POST", "/api/generate", "client"],
+      ["POST", "/api/chat", "client"],
+      ["POST", "/api/embed", "client"],
+      ["POST", "/api/embeddings", "client"],
+      ["GET", "/api/tags", "client"],
+      ["GET", "/api/ps", "client"],
+      ["POST", "/api/show", "client"],
+      ["GET", "/api/version", "client"],
+      ["POST", "/api/create", "admin"],
+      ["POST", "/api/copy", "admin"],
+      ["POST", "/api/pull", "admin"],
+      ["POST", "/api/push", "admin"],
+      ["DELETE", "/api/delete", "admin"],
+    ],
+  },
+  {
+    title: "OpenAI/vLLM Proxy",
+    endpoints: [
+      ["POST", "/v1/chat/completions", "client"],
+      ["POST", "/v1/chat/completions/batch", "client"],
+      ["POST", "/v1/completions", "client"],
+      ["POST", "/v1/embeddings", "client"],
+      ["GET", "/v1/models", "client"],
+      ["GET", "/v1/models/:model", "client"],
+      ["POST", "/v2/embed", "client"],
+      ["POST", "/score", "client"],
+      ["POST", "/v1/score", "client"],
+      ["POST", "/rerank", "client"],
+      ["POST", "/v1/rerank", "client"],
+      ["POST", "/v2/rerank", "client"],
+      ["POST", "/tokenize", "client"],
+      ["POST", "/detokenize", "client"],
+      ["GET", "/health", "client"],
+      ["GET", "/version", "client"],
+      ["GET", "/tokenizer_info", "client"],
+      ["GET", "/is_sleeping", "client"],
+      ["GET", "/load", "admin"],
+      ["GET", "/metrics", "admin targeted"],
+      ["POST", "/v1/load_lora_adapter", "admin targeted"],
+      ["POST", "/v1/unload_lora_adapter", "admin targeted"],
+      ["POST", "/v1/lora_adapters", "admin targeted"],
+      ["POST", "/start_profile", "admin targeted"],
+      ["POST", "/stop_profile", "admin targeted"],
+      ["POST", "/sleep", "admin targeted"],
+      ["POST", "/wake_up", "admin targeted"],
+    ],
+  },
+];
+
+document.addEventListener("DOMContentLoaded", init);
+
+async function init() {
+  bindEvents();
+  renderApiSurface();
+  state.config = await requestJson("/config.json", { noAuth: true });
+  $("#proxy-endpoint").textContent = state.config.proxyEndpoint;
+  $("#management-endpoint").textContent = state.config.managementEndpoint;
+  $("#login-proxy-endpoint").textContent = state.config.proxyEndpoint;
+  $("#login-management-endpoint").textContent = state.config.managementEndpoint;
+  if (state.config.key) {
+    $("#key-input").value = state.config.key;
+    state.key = state.config.key;
+    await connect();
+  }
+}
+
+function bindEvents() {
+  $("#login-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    state.key = $("#key-input").value.trim();
+    await connect();
+  });
+
+  $("#logout-button").addEventListener("click", () => {
+    if (state.refreshTimer) {
+      clearInterval(state.refreshTimer);
+      state.refreshTimer = null;
+    }
+    $("#dashboard-shell").classList.add("hidden");
+    $("#login-screen").classList.remove("hidden");
+    state.role = "disconnected";
+    state.admin = false;
+    renderRole();
+    setLoginStatus("Enter a key to connect.");
+  });
+
+  $("#toggle-key").addEventListener("click", () => {
+    const input = $("#key-input");
+    input.type = input.type === "password" ? "text" : "password";
+  });
+
+  $("#refresh-button").addEventListener("click", () => refreshCurrentView());
+  $("#refresh-interval").addEventListener("change", () => {
+    state.refreshIntervalMs = Number($("#refresh-interval").value);
+    configureAutoRefresh();
+  });
+
+  $$(".nav-button").forEach((button) => {
+    button.addEventListener("click", () => showView(button.dataset.view));
+  });
+
+  document.addEventListener("click", async (event) => {
+    const action = event.target?.dataset?.action;
+    if (!action) return;
+    if (action === "load-ollama-tags") return loadOllamaTags();
+    if (action === "load-openai-models") return loadOpenAiModels();
+    if (action === "load-keys") return loadKeys();
+    if (action === "load-workers") return loadWorkers();
+    if (action === "load-queue") return loadQueue();
+    if (action === "delete-key") return deleteKey(Number(event.target.dataset.id));
+    if (action === "save-key") return saveKey(Number(event.target.dataset.id));
+    if (action === "copy-token") return copyToken(event.target.dataset.token);
+    if (action === "select-model") {
+      return selectModel(
+        event.target.dataset.source,
+        event.target.dataset.model,
+        event.target.dataset.defaultMode,
+      );
+    }
+  });
+
+  $("#create-key-form").addEventListener("submit", createKey);
+  $("#worker-command-form").addEventListener("submit", sendWorkerCommand);
+  $("#prompt-form").addEventListener("submit", runPrompt);
+  $("#model-console-mode").addEventListener("change", () => {
+    if (state.selectedModel) {
+      state.selectedModel.mode = $("#model-console-mode").value;
+      renderModelConsole();
+    }
+  });
+  $$("#key-role-tabs .tab").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.keyRoleFilter = button.dataset.roleFilter;
+      renderKeys();
+    });
+  });
+}
+
+async function connect() {
+  if (!state.key) {
+    setLoginStatus("Enter a Hive key.", true);
+    return;
+  }
+  setLoginStatus("Checking key...");
+  resetData();
+
+  const adminProbe = await api("management", "/key", { expected: [200, 403, 401] });
+  if (adminProbe.status === 200) {
+    state.admin = true;
+    state.role = "admin";
+    state.refreshIntervalMs = Number($("#refresh-interval").value || 5000);
+    state.data.keys = adminProbe.body;
+    setStatus("Connected as admin.");
+    await Promise.all([loadWorkers(), loadQueue(), loadOllamaTags(), loadOpenAiModels()]);
+  } else {
+    const modelProbe = await api("proxy", "/api/tags", { expected: [200, 401, 403, 404, 500] });
+    if (modelProbe.status === 401 || modelProbe.status === 403) {
+      state.admin = false;
+      state.role = "disconnected";
+      setLoginStatus("Key was rejected by HiveCore.", true);
+      renderRole();
+      return;
+    }
+    state.admin = false;
+    state.role = "client";
+    state.refreshIntervalMs = 0;
+    $("#refresh-interval").value = "0";
+    setStatus("Connected as client.");
+    if (modelProbe.status === 200) state.data.ollamaTags = modelProbe.body;
+    await loadOpenAiModels({ quiet: true });
+  }
+
+  renderRole();
+  renderAll();
+  $("#login-screen").classList.add("hidden");
+  $("#dashboard-shell").classList.remove("hidden");
+  configureAutoRefresh();
+}
+
+function resetData() {
+  state.data = {
+    keys: [],
+    workers: {},
+    connections: {},
+    pings: {},
+    tags: {},
+    versions: {},
+    queue: null,
+    ollamaTags: null,
+    openaiModels: null,
+  };
+  state.selectedModel = null;
+}
+
+function renderRole() {
+  const pill = $("#role-pill");
+  pill.className = `pill ${state.role === "admin" ? "admin" : state.role === "client" ? "client" : ""}`;
+  pill.textContent =
+    state.role === "admin" ? "Admin key" : state.role === "client" ? "Client key" : "Disconnected";
+  $("#metric-role").textContent = state.role;
+  $(".refresh-control").classList.toggle("hidden", !state.admin);
+  $$(".admin-only").forEach((element) => {
+    element.classList.toggle("hidden", !state.admin);
+  });
+  renderApiSurface();
+  if (!state.admin && ["keys", "workers"].includes(currentView())) {
+    showView("overview");
+  }
+}
+
+function configureAutoRefresh() {
+  if (state.refreshTimer) {
+    clearInterval(state.refreshTimer);
+    state.refreshTimer = null;
+  }
+  if (!state.admin || !state.refreshIntervalMs) return;
+  state.refreshTimer = setInterval(() => {
+    refreshCurrentView({ soft: true }).catch((error) => {
+      setStatus(error.message, true);
+    });
+  }, state.refreshIntervalMs);
+}
+
+function showView(name) {
+  $$(".nav-button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.view === name);
+  });
+  $$(".view").forEach((view) => view.classList.remove("active"));
+  $(`#${name}-view`).classList.add("active");
+  $("#page-title").textContent = titleCase(name);
+  refreshCurrentView({ soft: true });
+}
+
+function currentView() {
+  return $(".nav-button.active")?.dataset.view || "overview";
+}
+
+async function refreshCurrentView(options = {}) {
+  if (!state.key) return;
+  const view = currentView();
+  if (!options.soft) setStatus("Refreshing...");
+  if (view === "overview") {
+    await Promise.all([
+      state.admin ? loadWorkers({ quiet: true }) : Promise.resolve(),
+      state.admin ? loadQueue({ quiet: true }) : Promise.resolve(),
+      loadOllamaTags({ quiet: true }),
+      loadOpenAiModels({ quiet: true }),
+    ]);
+  }
+  if (view === "models") await Promise.all([loadOllamaTags({ quiet: true }), loadOpenAiModels({ quiet: true })]);
+  if (view === "keys" && state.admin) await loadKeys({ quiet: true });
+  if (view === "workers" && state.admin) await Promise.all([loadWorkers({ quiet: true }), loadQueue({ quiet: true })]);
+  renderAll();
+  if (!options.soft) setStatus("Refreshed.");
+}
+
+async function loadKeys() {
+  const response = await api("management", "/key");
+  state.data.keys = response.body;
+  renderKeys();
+}
+
+async function loadWorkers() {
+  const [workers, connections, pings, tags, versions] = await Promise.all([
+    api("management", "/worker/status"),
+    api("management", "/worker/connections"),
+    api("management", "/worker/pings"),
+    api("management", "/worker/tags"),
+    api("management", "/worker/versions"),
+  ]);
+  state.data.workers = workers.body;
+  state.data.connections = connections.body;
+  state.data.pings = pings.body;
+  state.data.tags = tags.body;
+  state.data.versions = versions.body;
+  renderWorkers();
+}
+
+async function loadQueue() {
+  const response = await api("management", "/queue");
+  state.data.queue = response.body;
+  renderQueue();
+}
+
+async function loadOllamaTags() {
+  const response = await api("proxy", "/api/tags", { expected: [200, 404, 500] });
+  state.data.ollamaTags = response.status === 200 ? response.body : { error: response.body || response.status };
+  renderModels();
+}
+
+async function loadOpenAiModels() {
+  const response = await api("proxy", "/v1/models", { expected: [200, 404, 500] });
+  state.data.openaiModels = response.status === 200 ? response.body : { error: response.body || response.status };
+  renderModels();
+}
+
+function renderAll() {
+  renderRole();
+  renderOverview();
+  renderModels();
+  if (state.admin) {
+    renderKeys();
+    renderWorkers();
+    renderQueue();
+  }
+}
+
+function renderOverview() {
+  const workerCount = Object.keys(state.data.workers || {}).length;
+  const ollamaModels = extractOllamaModels(state.data.ollamaTags);
+  const openaiModels = extractOpenAiModels(state.data.openaiModels);
+  const modelIds = new Set([
+    ...ollamaModels.map((model) => model.name || model.model || model),
+    ...openaiModels.map((model) => model.id || model),
+  ].filter(Boolean));
+  const queued = state.data.queue
+    ? Object.values(state.data.queue.model_queue || {}).reduce((sum, value) => sum + Number(value || 0), 0) +
+      Object.values(state.data.queue.node_queue || {}).reduce((sum, value) => sum + Number(value || 0), 0)
+    : 0;
+
+  $("#metric-workers").textContent = state.admin ? workerCount : "-";
+  $("#metric-models").textContent = modelIds.size || "-";
+  $("#metric-queued").textContent = state.admin ? queued : "-";
+  $("#overview-workers").closest(".panel").classList.toggle("hidden", !state.admin);
+  $("#overview-queues").closest(".panel").classList.toggle("hidden", !state.admin);
+  $("#overview-backends").closest(".panel").classList.toggle("hidden", !state.admin);
+  renderOverviewWorkers();
+  renderOverviewQueues(queued);
+  renderOverviewBackends();
+  renderOverviewModels(ollamaModels, openaiModels);
+}
+
+function renderOverviewWorkers() {
+  const root = $("#overview-workers");
+  if (!state.admin) {
+    root.innerHTML = "";
+    return;
+  }
+  const workers = Object.entries(state.data.workers || {}).sort(([a], [b]) => a.localeCompare(b));
+  if (!workers.length) {
+    root.innerHTML = mutedBlock("No connected workers.");
+    return;
+  }
+  const visible = workers.slice(0, 12).map(([name, worker]) => {
+    return overviewRow(name, `${worker.backend || "-"} · ${worker.state || "-"}`);
+  });
+  if (workers.length > 12) {
+    visible.push(overviewRow(`${workers.length - 12} more`, "Open Workers for the full list."));
+  }
+  root.innerHTML = visible.join("");
+}
+
+function renderOverviewQueues(queued) {
+  const root = $("#overview-queues");
+  if (!state.admin) {
+    root.innerHTML = "";
+    return;
+  }
+  const queue = state.data.queue || { model_queue: {}, node_queue: {} };
+  if (!queued) {
+    root.innerHTML = overviewRow("All queues", "Idle");
+    return;
+  }
+  const rows = [
+    ...Object.entries(queue.model_queue || {})
+      .filter(([, count]) => Number(count) > 0)
+      .map(([name, count]) => overviewRow(name, `${count} model queued`)),
+    ...Object.entries(queue.node_queue || {})
+      .filter(([, count]) => Number(count) > 0)
+      .map(([name, count]) => overviewRow(name, `${count} node queued`)),
+  ];
+  root.innerHTML = rows.join("");
+}
+
+function renderOverviewBackends() {
+  const root = $("#overview-backends");
+  if (!state.admin) {
+    root.innerHTML = "";
+    return;
+  }
+  const counts = {};
+  for (const worker of Object.values(state.data.workers || {})) {
+    const backend = worker.backend || "unknown";
+    counts[backend] = (counts[backend] || 0) + 1;
+  }
+  const entries = Object.entries(counts).sort(([a], [b]) => a.localeCompare(b));
+  root.innerHTML = entries.length
+    ? entries.map(([backend, count]) => overviewRow(backend, `${count} worker${count === 1 ? "" : "s"}`)).join("")
+    : mutedBlock("No backend data.");
+}
+
+function renderOverviewModels(ollamaModels, openaiModels) {
+  const root = $("#overview-models");
+  const embeddingCount = ollamaModels.filter((model) => defaultModeForModel(model) === "embedding").length;
+  root.innerHTML = [
+    overviewRow("Ollama visible", `${ollamaModels.length} model${ollamaModels.length === 1 ? "" : "s"}`),
+    overviewRow("OpenAI visible", `${openaiModels.length} model${openaiModels.length === 1 ? "" : "s"}`),
+    overviewRow("Embedding-likely", `${embeddingCount} Ollama model${embeddingCount === 1 ? "" : "s"}`),
+  ].join("");
+}
+
+function overviewRow(label, value) {
+  return `
+    <div class="overview-row">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
+function mutedBlock(text) {
+  return `<div class="muted-block">${escapeHtml(text)}</div>`;
+}
+
+function renderModels() {
+  renderModelList("#ollama-models", "ollama", extractOllamaModels(state.data.ollamaTags), state.data.ollamaTags);
+  renderModelList("#openai-models", "openai", extractOpenAiModels(state.data.openaiModels), state.data.openaiModels);
+  renderModelConsole();
+  renderOverview();
+}
+
+function renderModelList(selector, source, models, raw) {
+  const root = $(selector);
+  if (!raw) {
+    root.className = "list-empty";
+    root.textContent = "No data loaded.";
+    return;
+  }
+  if (raw.error) {
+    root.className = "list-empty";
+    root.textContent = `Unavailable: ${stringifyError(raw.error)}`;
+    return;
+  }
+  if (!models.length) {
+    root.className = "list-empty";
+    root.textContent = "No models returned.";
+    return;
+  }
+  root.className = "table-wrap";
+  root.innerHTML = table(
+    ["Model", "Type", "Details"],
+    models.map((model) => {
+      const name = model.name || model.model || model.id || String(model);
+      const defaultMode = defaultModeForModel(model);
+      const details = model.size
+        ? formatBytes(model.size)
+        : model.owned_by || model.object || model.modified_at || "";
+      return [
+        `<button class="link-button" data-action="select-model" data-source="${source}" data-model="${escapeAttr(name)}" data-default-mode="${defaultMode}">${escapeHtml(name)}</button>`,
+        escapeHtml(defaultMode),
+        escapeHtml(details),
+      ];
+    }),
+  );
+}
+
+function renderKeys() {
+  if (!state.admin) return;
+  const keys = (state.data.keys || []).filter((key) => {
+    return state.keyRoleFilter === "all" || key.role === state.keyRoleFilter;
+  });
+  $$("#key-role-tabs .tab").forEach((button) => {
+    button.classList.toggle("active", button.dataset.roleFilter === state.keyRoleFilter);
+  });
+  if (!keys.length) {
+    $("#keys-table").innerHTML = empty();
+    return;
+  }
+  $("#keys-table").innerHTML = table(
+    ["ID", "Name", "Token", "Role", "Capture", "Whitelist", "Blacklist", "Actions"],
+    keys.map((key) => [
+      key.id,
+      `<input data-key-name="${key.id}" value="${escapeAttr(key.name)}" />`,
+      `<button class="token-copy" data-action="copy-token" data-token="${escapeAttr(key.token)}" title="Copy token">${escapeHtml(maskToken(key.token))}</button>`,
+      escapeHtml(key.role),
+      `<label class="check"><input data-key-capture="${key.id}" type="checkbox" ${key.capture ? "checked" : ""} /> capture</label>`,
+      tags(key.whitelist_models),
+      tags(key.blacklist_models),
+      `<button class="small" data-action="save-key" data-id="${key.id}">Save</button>
+       <button class="small" data-action="delete-key" data-id="${key.id}">Delete</button>`,
+    ]),
+  );
+}
+
+function renderWorkers() {
+  if (!state.admin) return;
+  const names = Array.from(
+    new Set([
+      ...Object.keys(state.data.workers || {}),
+      ...Object.keys(state.data.connections || {}),
+      ...Object.keys(state.data.pings || {}),
+      ...Object.keys(state.data.tags || {}),
+      ...Object.keys(state.data.versions || {}),
+    ]),
+  ).sort();
+
+  if (!names.length) {
+    $("#workers-grid").innerHTML = empty();
+    return;
+  }
+
+  const totalConnections = names.reduce((sum, name) => {
+    return sum + Number(state.data.connections[name]?.connections || 1);
+  }, 0);
+  const working = names.reduce((sum, name) => {
+    const connection = state.data.connections[name] || {};
+    return sum + Number(connection.working_connections || 0);
+  }, 0);
+  $("#workers-grid").innerHTML = `
+    <div class="worker-summary">
+      <strong>${working}/${totalConnections}</strong>
+      <span>connections working</span>
+    </div>
+    ${names
+      .map((name) => {
+      const worker = state.data.workers[name] || {};
+      const connection = state.data.connections[name] || {};
+      const ping = state.data.pings[name] || {};
+      const version = state.data.versions[name] || {};
+      const models = state.data.tags[name] || [];
+      const connections = Number(connection.connections || 1);
+      const workingConnections = Number(connection.working_connections || 0);
+      const isWorking = workingConnections > 0;
+      const workingPercent = connections ? Math.round((workingConnections / connections) * 100) : 0;
+      return `
+        <article class="worker-card ${isWorking ? "working" : "idle"}">
+          <div class="worker-card-head">
+            <strong>${escapeHtml(name)}</strong>
+            <span>${escapeHtml(connection.state || worker.state || "-")}</span>
+          </div>
+          <div class="worker-meta">
+            <span>Type</span>
+            <strong>${escapeHtml(connection.backend || worker.backend || version.backend || "-")}</strong>
+          </div>
+          <div class="worker-meta">
+            <span>Connections</span>
+            <strong>${connections}</strong>
+          </div>
+          <div class="worker-bar" title="${workingConnections}/${connections} working">
+            <span style="width: ${workingPercent}%"></span>
+          </div>
+          <div class="worker-foot">
+            <span>${workingConnections}/${connections} working</span>
+            <span>poll ${formatMs(ping.last_poll_ms)}</span>
+          </div>
+          <div class="worker-models">${tags(models.slice(0, 8))}</div>
+        </article>
+      `;
+    })
+      .join("")}
+  `;
+}
+
+function renderQueue() {
+  if (!state.admin) return;
+  $("#queue-json").textContent = pretty(state.data.queue || {});
+  renderOverview();
+}
+
+async function createKey(event) {
+  event.preventDefault();
+  const name = $("#new-key-name").value.trim();
+  if (!name) return setStatus("Key name is required.", true);
+  const payload = {
+    name,
+    role: $("#new-key-role").value,
+    capture: $("#new-key-capture").checked,
+    whitelist_models: splitCsv($("#new-key-whitelist").value),
+    blacklist_models: splitCsv($("#new-key-blacklist").value),
+  };
+  const response = await api("management", "/key", {
+    method: "POST",
+    body: payload,
+    expected: [201, 400, 409, 500],
+  });
+  if (response.status !== 201) return setStatus(`Create failed: ${response.status}`, true);
+  $("#created-token").innerHTML = `Created token: <code>${escapeHtml(response.body.token)}</code>`;
+  $("#create-key-form").reset();
+  $("#new-key-capture").checked = true;
+  await loadKeys();
+}
+
+async function copyToken(token) {
+  try {
+    await navigator.clipboard.writeText(token);
+    setStatus("Token copied.");
+  } catch {
+    fallbackCopy(token);
+    setStatus("Token copied.");
+  }
+}
+
+function fallbackCopy(text) {
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand("copy");
+  input.remove();
+}
+
+async function saveKey(id) {
+  const name = document.querySelector(`[data-key-name="${id}"]`).value.trim();
+  const capture = document.querySelector(`[data-key-capture="${id}"]`).checked;
+  const response = await api("management", "/key", {
+    method: "PATCH",
+    body: { id, name, capture },
+    expected: [200, 400, 404, 409, 500],
+  });
+  if (response.status !== 200) return setStatus(`Save failed: ${response.status}`, true);
+  setStatus("Key updated.");
+  await loadKeys();
+}
+
+async function deleteKey(id) {
+  if (!confirm(`Soft delete key ${id}?`)) return;
+  const response = await api("management", "/key", {
+    method: "DELETE",
+    body: { id },
+    expected: [204, 404, 500],
+  });
+  if (response.status !== 204) return setStatus(`Delete failed: ${response.status}`, true);
+  setStatus("Key deleted.");
+  await loadKeys();
+}
+
+async function sendWorkerCommand(event) {
+  event.preventDefault();
+  const worker = $("#command-worker").value.trim();
+  const command = $("#command-name").value;
+  if (!worker) return setStatus("Worker name is required.", true);
+  const response = await api("management", "/worker/command", {
+    method: "POST",
+    body: { worker, command },
+    expected: [202, 400, 500],
+  });
+  setStatus(response.status === 202 ? "Worker command queued." : `Command failed: ${response.status}`, response.status !== 202);
+}
+
+function selectModel(source, name, defaultMode) {
+  state.selectedModel = {
+    source,
+    name,
+    mode: defaultMode || "chat",
+  };
+  $("#model-console-mode").disabled = false;
+  $("#model-run-button").disabled = false;
+  renderModelConsole();
+  setPromptOutput("Response will appear here.", true);
+}
+
+function renderModelConsole() {
+  const selected = state.selectedModel;
+  if (!selected) {
+    $("#model-console-title").textContent = "Select a model";
+    $("#model-console-subtitle").textContent = "Choose a model from either list.";
+    $("#model-console-mode").disabled = true;
+    $("#model-run-button").disabled = true;
+    return;
+  }
+  $("#model-console-title").textContent = selected.name;
+  $("#model-console-subtitle").textContent =
+    selected.source === "ollama" ? "Ollama native endpoints" : "OpenAI-compatible endpoints";
+  $("#model-console-mode").value = selected.mode;
+}
+
+async function runPrompt(event) {
+  event.preventDefault();
+  const selected = state.selectedModel;
+  const input = $("#prompt-text").value;
+  if (!selected) return setStatus("Select a model first.", true);
+  setPromptOutput("Running...", true);
+  setStatus(`Running ${selected.mode} on ${selected.name}...`);
+
+  if (selected.mode === "embedding") {
+    await runEmbedding(selected, input);
+    setStatus("Embedding finished.");
+    return;
+  }
+
+  if (selected.source === "openai") {
+    await streamRequest(
+      "/v1/chat/completions",
+      {
+        model: selected.name,
+        messages: [{ role: "user", content: input }],
+        stream: true,
+      },
+      parseOpenAiStream,
+    );
+  } else {
+    await streamRequest(
+      "/api/chat",
+      {
+        model: selected.name,
+        messages: [{ role: "user", content: input }],
+        stream: true,
+      },
+      parseOllamaChatStream,
+    );
+  }
+  setStatus("Prompt finished.");
+}
+
+async function runEmbedding(selected, input) {
+  const path = selected.source === "openai" ? "/v1/embeddings" : "/api/embed";
+  const body =
+    selected.source === "openai"
+      ? { model: selected.name, input }
+      : { model: selected.name, input };
+  const response = await api("proxy", path, {
+    method: "POST",
+    body,
+    expected: [200, 400, 403, 404, 500],
+  });
+  setPromptOutput(summarizeEmbeddingResponse(response.status, response.body));
+}
+
+async function streamRequest(path, body, parser) {
+  const response = await fetch(`/api/proxy${path}`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!response.ok || !response.body) {
+    setPromptOutput(`HTTP ${response.status}\n${await response.text()}`);
+    return;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parsed = parser(buffer);
+    buffer = parsed.rest;
+    if (parsed.text) appendPromptOutput(parsed.text);
+  }
+}
+
+function parseOllamaStream(buffer) {
+  const lines = buffer.split(/\r?\n/);
+  const rest = lines.pop() || "";
+  let text = "";
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      text += JSON.parse(line).response || "";
+    } catch {
+      text += `${line}\n`;
+    }
+  }
+  return { text, rest };
+}
+
+function parseOllamaChatStream(buffer) {
+  const lines = buffer.split(/\r?\n/);
+  const rest = lines.pop() || "";
+  let text = "";
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line);
+      text += parsed.message?.content || parsed.response || "";
+    } catch {
+      text += `${line}\n`;
+    }
+  }
+  return { text, rest };
+}
+
+function parseOpenAiStream(buffer) {
+  const lines = buffer.split(/\r?\n/);
+  const rest = lines.pop() || "";
+  let text = "";
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(data);
+      text += parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.text || "";
+    } catch {
+      text += `${data}\n`;
+    }
+  }
+  return { text, rest };
+}
+
+function summarizeEmbeddingResponse(status, body) {
+  if (status !== 200) {
+    return `HTTP ${status}\n${pretty(body)}`;
+  }
+  const vectors = [];
+  collectEmbeddingVectors(body, vectors);
+  const summary = {
+    status,
+    vectors: vectors.length,
+    dimensions: vectors.map((vector) => vector.length).filter(Boolean).slice(0, 10),
+    usage: body?.usage || null,
+  };
+  return pretty(summary);
+}
+
+function collectEmbeddingVectors(value, vectors) {
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value) && value.every((item) => typeof item === "number")) {
+    vectors.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectEmbeddingVectors(item, vectors));
+    return;
+  }
+  for (const child of Object.values(value)) {
+    collectEmbeddingVectors(child, vectors);
+  }
+}
+
+async function api(kind, path, options = {}) {
+  const method = options.method || "GET";
+  const response = await fetch(`/api/${kind}${path}`, {
+    method,
+    headers: authHeaders(options.body),
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  const text = await response.text();
+  const body = parseBody(text);
+  const expected = options.expected || [200];
+  if (!expected.includes(response.status)) {
+    throw new Error(`${method} ${kind}${path} returned ${response.status}: ${text}`);
+  }
+  return { status: response.status, body };
+}
+
+async function requestJson(path) {
+  const response = await fetch(path);
+  if (!response.ok) throw new Error(`${path} returned ${response.status}`);
+  return response.json();
+}
+
+function authHeaders(hasBody = true) {
+  const headers = {};
+  if (hasBody) headers["content-type"] = "application/json";
+  if (state.key) {
+    headers.authorization = `Bearer ${state.key}`;
+    headers["api-key"] = state.key;
+  }
+  return headers;
+}
+
+function parseBody(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function extractOllamaModels(value) {
+  if (!value || value.error) return [];
+  if (Array.isArray(value.models)) return value.models;
+  if (Array.isArray(value)) return value;
+  return [];
+}
+
+function extractOpenAiModels(value) {
+  if (!value || value.error) return [];
+  if (Array.isArray(value.data)) return value.data;
+  if (Array.isArray(value.models)) return value.models;
+  if (Array.isArray(value)) return value;
+  return [];
+}
+
+function defaultModeForModel(model) {
+  const capabilities = Array.isArray(model.capabilities) ? model.capabilities : [];
+  const family = model.details?.family || "";
+  const name = model.name || model.model || model.id || "";
+  if (
+    capabilities.includes("embedding") ||
+    family.toLowerCase().includes("bert") ||
+    name.toLowerCase().includes("embed") ||
+    name.toLowerCase().includes("bge")
+  ) {
+    return "embedding";
+  }
+  return "chat";
+}
+
+function renderApiSurface() {
+  $("#api-surface").innerHTML = apiSurface
+    .map((group) => ({
+      ...group,
+      endpoints: group.endpoints.filter((endpoint) => state.admin || endpoint[2] === "client"),
+    }))
+    .filter((group) => group.endpoints.length > 0)
+    .map(
+      (group) => `
+        <section class="api-card">
+          <h3>${escapeHtml(group.title)}</h3>
+          <div class="endpoint-list">
+            ${group.endpoints
+              .map(
+                ([method, path, scope]) => `
+                  <div class="endpoint">
+                    <span class="method ${method.toLowerCase()}">${method}</span>
+                    <div>
+                      <div class="path">${escapeHtml(path)}</div>
+                      <div class="scope">${escapeHtml(scope)}</div>
+                    </div>
+                  </div>
+                `,
+              )
+              .join("")}
+          </div>
+        </section>
+      `,
+    )
+    .join("");
+}
+
+function table(headers, rows) {
+  return `
+    <table>
+      <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
+      <tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")}</tbody>
+    </table>
+  `;
+}
+
+function tags(values) {
+  const list = Array.isArray(values) ? values : [];
+  if (!list.length) return '<span class="tag">any</span>';
+  return `<div class="tag-list">${list.map((value) => `<span class="tag">${escapeHtml(String(value))}</span>`).join("")}</div>`;
+}
+
+function empty() {
+  return $("#empty-template").innerHTML;
+}
+
+function splitCsv(value) {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function pretty(value) {
+  return JSON.stringify(value, null, 2);
+}
+
+function titleCase(value) {
+  return value.slice(0, 1).toUpperCase() + value.slice(1);
+}
+
+function formatMs(value) {
+  if (value === undefined || value === null) return "-";
+  if (value < 1000) return `${value}ms`;
+  return `${Math.round(value / 1000)}s`;
+}
+
+function formatBytes(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = number;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function maskToken(token) {
+  if (!token) return "-";
+  if (token.length <= 12) return token;
+  return `${token.slice(0, 8)}...${token.slice(-6)}`;
+}
+
+function stringifyError(value) {
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+function setStatus(message, error = false) {
+  const element = $("#status-line");
+  element.textContent = message;
+  element.classList.toggle("error", error);
+}
+
+function setPromptOutput(text, empty = false) {
+  const element = $("#prompt-output");
+  element.textContent = text;
+  element.classList.toggle("empty", empty);
+}
+
+function appendPromptOutput(text) {
+  const element = $("#prompt-output");
+  if (element.classList.contains("empty")) {
+    element.textContent = "";
+    element.classList.remove("empty");
+  }
+  element.textContent += text;
+  element.scrollTop = element.scrollHeight;
+}
+
+function setLoginStatus(message, error = false) {
+  const element = $("#login-status-line");
+  element.textContent = message;
+  element.classList.toggle("error", error);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replaceAll("'", "&#39;");
+}
