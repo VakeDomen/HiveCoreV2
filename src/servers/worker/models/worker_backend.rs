@@ -3,6 +3,7 @@ pub enum WorkerBackend {
     OllamaLegacy,
     Ollama,
     Vllm,
+    Unknown,
 }
 
 impl WorkerBackend {
@@ -20,6 +21,7 @@ impl WorkerBackend {
             Self::OllamaLegacy => "ollama_legacy",
             Self::Ollama => "ollama",
             Self::Vllm => "vllm",
+            Self::Unknown => "unknown",
         }
     }
 }

@@ -8,7 +8,7 @@ use crate::app::AppState;
 use crate::auth::Role;
 use crate::servers::proxy::models::response_target::ResponseTarget;
 use crate::servers::proxy::models::worker_http_response::WorkerHttpResponse;
-use crate::servers::worker::models::worker_backend::WorkerBackend;
+use crate::servers::worker::models::worker_backend::{self, WorkerBackend};
 use crate::servers::worker::models::worker_phase::WorkerPhase;
 use crate::servers::worker::models::worker_status::WorkerStatus;
 use crate::shared::capture::{
@@ -52,7 +52,7 @@ fn handle_connection(state: Arc<AppState>, stream: TcpStream) -> io::Result<()> 
     let mut writer = stream;
 
     let auth_request = read_request_from_reader(&mut reader)?;
-    let worker_name = authenticate_worker(&state, &mut writer, &auth_request)?;
+    let (worker_name, connection_index) = authenticate_worker(&state, &mut writer, &auth_request)?;
     log::success(format!(
         "worker authenticated name={}",
         log::bold(&worker_name)
@@ -62,7 +62,7 @@ fn handle_connection(state: Arc<AppState>, stream: TcpStream) -> io::Result<()> 
         let request = match read_request_from_reader(&mut reader) {
             Ok(request) => request,
             Err(err) => {
-                remove_worker(&state, &worker_name);
+                remove_worker(&state, &worker_name, connection_index);
                 log::warn(format!(
                     "worker disconnected name={} error={err}",
                     worker_name
@@ -72,11 +72,30 @@ fn handle_connection(state: Arc<AppState>, stream: TcpStream) -> io::Result<()> 
         };
 
         match request.method.as_str() {
-            "POLL" | "POLL-OLLAMA" | "POLL-VLLM" => {
-                handle_poll(&state, &worker_name, &request, &mut writer, &mut reader)?
-            }
-            "PING" => touch_worker(&state, &worker_name, None, None, WorkerPhase::Polling),
-            _ => touch_worker(&state, &worker_name, None, None, WorkerPhase::Polling),
+            "POLL" | "POLL-OLLAMA" | "POLL-VLLM" => handle_poll(
+                &state,
+                &worker_name,
+                connection_index,
+                &request,
+                &mut writer,
+                &mut reader,
+            )?,
+            "PING" => touch_worker(
+                &state,
+                &worker_name,
+                connection_index,
+                None,
+                WorkerPhase::Polling,
+                None,
+            ),
+            _ => touch_worker(
+                &state,
+                &worker_name,
+                connection_index,
+                None,
+                WorkerPhase::Polling,
+                None,
+            ),
         }
     }
 }
@@ -85,7 +104,7 @@ fn authenticate_worker(
     state: &Arc<AppState>,
     writer: &mut TcpStream,
     request: &HttpRequest,
-) -> io::Result<String> {
+) -> io::Result<(String, u64)> {
     if request.protocol != "HIVE" || request.method != "AUTH" {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -115,36 +134,38 @@ fn authenticate_worker(
     };
 
     let worker_name = record.name.clone();
+    let connection_index;
     {
         let mut guard = state
             .workers
             .write()
             .map_err(|_| io::Error::other("worker registry poisoned"))?;
-        if let Some(existing) = guard.get(&worker_name) {
-            if existing.nonce != nonce {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "worker name already in use with a different nonce",
-                ));
-            }
-        }
-        guard.insert(
-            worker_name.clone(),
-            WorkerStatus {
+        let worker = guard
+            .entry(worker_name.clone())
+            .or_insert_with(|| WorkerStatus {
                 name: worker_name.clone(),
-                nonce,
-                hive_version,
-                ollama_version,
-                backend: WorkerBackend::OllamaLegacy,
+                hive_version: hive_version.clone(),
+                ollama_version: ollama_version.clone(),
+                backend: WorkerBackend::Unknown,
                 tags: Vec::new(),
                 state: WorkerPhase::Authenticating,
                 last_ping: Instant::now(),
                 last_poll: Instant::now(),
+                connections: Vec::new(),
+                next_connection_index: 0,
                 model_catalog: None,
                 running_models: None,
                 version_payload: None,
-            },
-        );
+            });
+        if !worker.accepts_nonce(&nonce) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "worker nonce mismatch",
+            ));
+        }
+        worker.hive_version = hive_version.clone();
+        worker.ollama_version = ollama_version.clone();
+        connection_index = worker.register_connection(nonce);
     }
 
     let response = HttpRequest {
@@ -156,7 +177,14 @@ fn authenticate_worker(
     };
     let bytes = serialize_request(&response);
     write_framed_request(writer, &bytes)?;
-    touch_worker(state, &worker_name, None, None, WorkerPhase::Polling);
+    touch_worker(
+        state,
+        &worker_name,
+        connection_index,
+        None,
+        WorkerPhase::Polling,
+        None,
+    );
     log::info(format!(
         "worker auth accepted name={} role={} hive_version={} ollama_version={}",
         log::bold(&worker_name),
@@ -164,12 +192,13 @@ fn authenticate_worker(
         log::bold(parts[2]),
         log::bold(parts[3])
     ));
-    Ok(worker_name)
+    Ok((worker_name, connection_index))
 }
 
 fn handle_poll(
     state: &Arc<AppState>,
     worker_name: &str,
+    connection_index: u64,
     poll_request: &HttpRequest,
     writer: &mut TcpStream,
     reader: &mut BufReader<TcpStream>,
@@ -188,27 +217,37 @@ fn handle_poll(
     touch_worker(
         state,
         worker_name,
+        connection_index,
         incoming_tags,
-        Some(backend),
         WorkerPhase::Polling,
+        Some(backend),
     );
 
-    let (tags, backend) = state
+    let tags = state
         .workers
         .read()
         .ok()
         .and_then(|guard| {
-            guard
-                .get(worker_name)
-                .map(|worker| (worker.tags.clone(), worker.backend))
+            guard.get(worker_name).and_then(|worker| {
+                worker
+                    .connection(connection_index)
+                    .map(|connection| connection.tags.clone())
+            })
         })
-        .unwrap_or_else(|| (Vec::new(), backend));
+        .unwrap_or_else(|| Vec::new());
 
     if let Some(task) = state
         .request_queue
         .dequeue_for_worker(worker_name, backend, &tags)
     {
-        touch_worker(state, worker_name, None, None, WorkerPhase::Working);
+        touch_worker(
+            state,
+            worker_name,
+            connection_index,
+            None,
+            WorkerPhase::Working,
+            None,
+        );
         let request_id = task.id;
         let request_method = task.request.method.clone();
         let request_uri = task.request.uri.clone();
@@ -335,7 +374,14 @@ fn handle_poll(
             let _ = state.stats_tx.send(usage_event);
         }
 
-        touch_worker(state, worker_name, None, None, WorkerPhase::Polling);
+        touch_worker(
+            state,
+            worker_name,
+            connection_index,
+            None,
+            WorkerPhase::Polling,
+            None,
+        );
         let total_time = queue_wait + worker_time;
         log::success(format!(
             "resolved request id={} user={} worker={} method={} uri={} status={} wait={} worker_time={} total={}",
@@ -753,29 +799,53 @@ fn discard_chunk_trailers(reader: &mut BufReader<TcpStream>) -> io::Result<()> {
 fn touch_worker(
     state: &Arc<AppState>,
     worker_name: &str,
+    connection_index: u64,
     tags: Option<Vec<String>>,
-    backend: Option<WorkerBackend>,
     phase: WorkerPhase,
+    worker_backend: Option<WorkerBackend>,
 ) {
     if let Ok(mut guard) = state.workers.write() {
         if let Some(worker) = guard.get_mut(worker_name) {
-            if let Some(tags) = tags {
-                worker.tags = tags;
+            if let Some(connection) = worker.connection_mut(connection_index) {
+                if let Some(tags) = tags {
+                    connection.tags = tags;
+                }
+                connection.state = phase;
+                connection.last_ping = Instant::now();
+                connection.last_poll = Instant::now();
+
+                if let Some(worker_backend) = worker_backend {
+                    worker.backend = worker_backend;
+                }
+            } else {
+                return;
             }
-            if let Some(backend) = backend {
-                worker.backend = backend;
-            }
-            worker.state = phase;
-            worker.last_ping = Instant::now();
-            worker.last_poll = Instant::now();
+            worker.sync_summary();
         }
     }
 }
 
-fn remove_worker(state: &Arc<AppState>, worker_name: &str) {
+fn remove_worker(state: &Arc<AppState>, worker_name: &str, connection_index: u64) {
     if let Ok(mut guard) = state.workers.write() {
-        guard.remove(worker_name);
-        log::info(format!("removed worker={}", log::bold(worker_name)));
+        let mut should_remove_worker = false;
+        let mut remaining = 0_usize;
+        if let Some(worker) = guard.get_mut(worker_name)
+            && worker.remove_connection(connection_index)
+        {
+            remaining = worker.connections.len();
+            should_remove_worker = remaining == 0;
+        }
+        if should_remove_worker {
+            guard.remove(worker_name);
+            log::info(format!("removed worker={}", log::bold(worker_name)));
+        } else if remaining > 0 {
+            log::info(format!(
+                "removed worker connection worker={} connection_index={} remaining={}",
+                log::bold(worker_name),
+                connection_index,
+                remaining
+            ));
+        }
     }
 }
 

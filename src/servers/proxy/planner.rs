@@ -720,7 +720,6 @@ mod tests {
     fn worker_status(name: &str, tags: Vec<&str>) -> WorkerStatus {
         WorkerStatus {
             name: name.to_string(),
-            nonce: "nonce".to_string(),
             hive_version: "0.1.0".to_string(),
             ollama_version: "0.1.0".to_string(),
             backend: WorkerBackend::OllamaLegacy,
@@ -728,6 +727,8 @@ mod tests {
             state: WorkerPhase::Polling,
             last_ping: Instant::now(),
             last_poll: Instant::now(),
+            connections: vec![],
+            next_connection_index: 0,
             model_catalog: Some(json!({"models":[{"name":"llama3"}]})),
             running_models: Some(json!({"models":[{"name":"llama3"}]})),
             version_payload: Some(json!({"version":"0.1.0"})),
