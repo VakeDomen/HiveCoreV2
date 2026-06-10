@@ -35,6 +35,7 @@ const apiSurface = [
       ["GET", "/worker/pings", "admin"],
       ["GET", "/worker/tags", "admin"],
       ["GET", "/worker/versions", "admin"],
+      ["GET", "/usage?from=YYYY-MM-DD&to=YYYY-MM-DD", "admin"],
       ["GET", "/key", "admin"],
       ["POST", "/key", "admin"],
       ["PATCH", "/key", "admin"],

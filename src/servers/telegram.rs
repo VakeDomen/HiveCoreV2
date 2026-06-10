@@ -527,12 +527,20 @@ mod tests {
         let report = format_usage_report(
             NaiveDate::from_ymd_opt(2026, 4, 28).expect("valid date"),
             &[DailyUsageRow {
+                usage_day: "2026-04-28".to_string(),
                 key_id: Some(1),
                 key_name: "alice".to_string(),
                 model: "bge-m3".to_string(),
                 request_count: 2,
+                success_count: 2,
+                error_count: 0,
                 prompt_tokens: 17,
                 completion_tokens: 5,
+                reasoning_tokens: 0,
+                total_tokens: 22,
+                queue_ms: 0,
+                worker_ms: 35,
+                total_ms: 35,
                 duration_ms: 35,
             }],
         );

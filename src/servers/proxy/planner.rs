@@ -15,6 +15,8 @@ use super::models::model_route_kind::ModelRouteKind;
 use super::models::route_plan::RoutePlan;
 use super::probe::{probe_worker_json, probe_worker_version};
 
+const AGGREGATE_PROBE_TIMEOUT_MS: u64 = 2_000;
+
 enum ProxyEndpoint {
     Generate,
     Chat,
@@ -625,7 +627,7 @@ fn parallel_probe_json(
     uri: &'static str,
     body: Option<Vec<u8>>,
 ) -> Vec<Value> {
-    let timeout = Duration::from_millis(state.config.proxy_timeout_ms);
+    let timeout = aggregate_probe_timeout(state);
     let (tx, rx) = mpsc::channel();
 
     thread::scope(|scope| {
@@ -650,7 +652,7 @@ fn parallel_probe_json(
 }
 
 fn parallel_probe_versions(state: &AppState, workers: Vec<String>) -> Vec<String> {
-    let timeout = Duration::from_millis(state.config.proxy_timeout_ms);
+    let timeout = aggregate_probe_timeout(state);
     let (tx, rx) = mpsc::channel();
 
     thread::scope(|scope| {
@@ -664,6 +666,15 @@ fn parallel_probe_versions(state: &AppState, workers: Vec<String>) -> Vec<String
     drop(tx);
 
     rx.into_iter().flatten().collect()
+}
+
+fn aggregate_probe_timeout(state: &AppState) -> Duration {
+    Duration::from_millis(
+        state
+            .config
+            .proxy_timeout_ms
+            .min(AGGREGATE_PROBE_TIMEOUT_MS),
+    )
 }
 
 #[cfg(test)]

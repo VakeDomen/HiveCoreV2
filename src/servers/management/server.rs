@@ -47,8 +47,14 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         return HttpResponse::new(403, "Unauthorized", Vec::new()).write_to(&mut stream);
     }
 
-    let response = match (request.method.as_str(), request.uri.as_str()) {
+    let route_path = request
+        .uri
+        .split('?')
+        .next()
+        .unwrap_or(request.uri.as_str());
+    let response = match (request.method.as_str(), route_path) {
         ("GET", "/queue") => routes::queue::get_queue(&state),
+        ("GET", "/usage") => routes::usage::get_usage(&state, &request),
         ("GET", "/worker/status") => routes::workers::get_status(&state),
         ("GET", "/worker/connections") => routes::workers::get_connections(&state),
         ("GET", "/worker/pings") => routes::workers::get_pings(&state),

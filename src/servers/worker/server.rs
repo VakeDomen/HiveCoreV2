@@ -8,7 +8,7 @@ use crate::app::AppState;
 use crate::auth::Role;
 use crate::servers::proxy::models::response_target::ResponseTarget;
 use crate::servers::proxy::models::worker_http_response::WorkerHttpResponse;
-use crate::servers::worker::models::worker_backend::{self, WorkerBackend};
+use crate::servers::worker::models::worker_backend::WorkerBackend;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
 use crate::servers::worker::models::worker_status::WorkerStatus;
 use crate::shared::capture::{
@@ -332,16 +332,18 @@ fn handle_poll(
             }
         }
 
-        // Record successful inference requests. Some upstreams do not return usage metadata,
-        // so those requests are still counted with zero tokens.
-        if status_code < 400 && task.context.model.is_some() {
+        // Record inference requests after the response has been relayed. SQLite writes happen
+        // in the background stats worker so request serving is not blocked on persistence.
+        if task.context.model.is_some() {
             let missing_usage = token_usage.is_none();
             let tu = token_usage.unwrap_or(TokenUsage {
                 prompt_tokens: 0,
                 completion_tokens: 0,
+                reasoning_tokens: 0,
+                total_tokens: 0,
             });
             let model = task.context.model.clone().unwrap_or_default();
-            if missing_usage {
+            if status_code < 400 && missing_usage {
                 log::warn(format!(
                     "usage metadata missing request id={} user={} model={} method={} uri={}",
                     log::bold(request_id.to_string()),
@@ -356,7 +358,9 @@ fn handle_poll(
                 .key_name
                 .clone()
                 .unwrap_or_else(|| "Unauthenticated".to_string());
-            let duration_ms = worker_time.as_millis() as u64;
+            let queue_ms = queue_wait.as_millis() as u64;
+            let worker_ms = worker_time.as_millis() as u64;
+            let total_ms = (queue_wait + worker_time).as_millis() as u64;
             let created_at = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -365,10 +369,18 @@ fn handle_poll(
             let usage_event = UsageEvent {
                 key_id: task.context.key_id,
                 key_name,
+                worker_name: worker_name.to_string(),
+                backend: backend.as_str().to_string(),
                 model,
+                status_code,
                 prompt_tokens: tu.prompt_tokens,
                 completion_tokens: tu.completion_tokens,
-                duration_ms,
+                reasoning_tokens: tu.reasoning_tokens,
+                total_tokens: tu.total_tokens,
+                queue_ms,
+                worker_ms,
+                total_ms,
+                duration_ms: worker_ms,
                 created_at,
             };
             let _ = state.stats_tx.send(usage_event);
@@ -931,6 +943,8 @@ mod tests {
             Some(TokenUsage {
                 prompt_tokens: 9,
                 completion_tokens: 4,
+                reasoning_tokens: 0,
+                total_tokens: 13,
             })
         );
         Ok(())
@@ -1033,6 +1047,8 @@ mod tests {
             Some(TokenUsage {
                 prompt_tokens: 9,
                 completion_tokens: 4,
+                reasoning_tokens: 0,
+                total_tokens: 13,
             })
         );
         Ok(())
@@ -1068,6 +1084,8 @@ mod tests {
             Some(TokenUsage {
                 prompt_tokens: 11,
                 completion_tokens: 3,
+                reasoning_tokens: 0,
+                total_tokens: 14,
             })
         );
         Ok(())

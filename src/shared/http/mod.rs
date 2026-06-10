@@ -12,6 +12,8 @@ pub use models::http_response::HttpResponse;
 pub struct TokenUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub total_tokens: u64,
 }
 
 /// Usage event sent to the stats worker via the mpsc channel.
@@ -19,9 +21,17 @@ pub struct TokenUsage {
 pub struct UsageEvent {
     pub key_id: Option<i64>,
     pub key_name: String,
+    pub worker_name: String,
+    pub backend: String,
     pub model: String,
+    pub status_code: u16,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub total_tokens: u64,
+    pub queue_ms: u64,
+    pub worker_ms: u64,
+    pub total_ms: u64,
     pub duration_ms: u64,
     pub created_at: u64, // unix timestamp in seconds
 }
@@ -176,6 +186,8 @@ fn parse_usage_value(text: &str) -> Option<TokenUsage> {
     Some(TokenUsage {
         prompt_tokens,
         completion_tokens,
+        reasoning_tokens: 0,
+        total_tokens: prompt_tokens + completion_tokens,
     })
 }
 
@@ -195,11 +207,36 @@ fn parse_openai_usage(usage: &serde_json::Value) -> Option<TokenUsage> {
                 .map(|total| total.saturating_sub(prompt_tokens))
         })
         .unwrap_or(0);
+    let reasoning_tokens = usage_u64(usage, &["reasoning_tokens", "thinking_tokens"])
+        .or_else(|| {
+            usage
+                .get("completion_tokens_details")
+                .and_then(|value| usage_u64(value, &["reasoning_tokens", "thinking_tokens"]))
+        })
+        .or_else(|| {
+            usage
+                .get("output_tokens_details")
+                .and_then(|value| usage_u64(value, &["reasoning_tokens", "thinking_tokens"]))
+        })
+        .unwrap_or(0);
+    let total_tokens = usage
+        .get("total_tokens")
+        .or_else(|| usage.get("totalTokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(prompt_tokens + completion_tokens);
 
     Some(TokenUsage {
         prompt_tokens,
         completion_tokens,
+        reasoning_tokens,
+        total_tokens,
     })
+}
+
+fn usage_u64(value: &serde_json::Value, fields: &[&str]) -> Option<u64> {
+    fields
+        .iter()
+        .find_map(|field| value.get(*field).and_then(serde_json::Value::as_u64))
 }
 
 impl HttpResponse {
@@ -344,6 +381,8 @@ mod tests {
             Some(TokenUsage {
                 prompt_tokens: 12,
                 completion_tokens: 34,
+                reasoning_tokens: 0,
+                total_tokens: 46,
             })
         );
     }
@@ -357,6 +396,23 @@ mod tests {
             Some(TokenUsage {
                 prompt_tokens: 9,
                 completion_tokens: 4,
+                reasoning_tokens: 0,
+                total_tokens: 13,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_openai_reasoning_tokens() {
+        assert_eq!(
+            parse_usage_json(
+                r#"{"usage":{"prompt_tokens":9,"completion_tokens":14,"total_tokens":23,"completion_tokens_details":{"reasoning_tokens":10}}}"#
+            ),
+            Some(TokenUsage {
+                prompt_tokens: 9,
+                completion_tokens: 14,
+                reasoning_tokens: 10,
+                total_tokens: 23,
             })
         );
     }
@@ -368,6 +424,8 @@ mod tests {
             Some(TokenUsage {
                 prompt_tokens: 21,
                 completion_tokens: 0,
+                reasoning_tokens: 0,
+                total_tokens: 21,
             })
         );
     }
@@ -379,6 +437,8 @@ mod tests {
             Some(TokenUsage {
                 prompt_tokens: 13,
                 completion_tokens: 0,
+                reasoning_tokens: 0,
+                total_tokens: 13,
             })
         );
     }
