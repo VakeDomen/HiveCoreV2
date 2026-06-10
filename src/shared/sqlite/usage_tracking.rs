@@ -25,7 +25,6 @@ pub struct DailyUsageRow {
     pub error_count: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
-    pub reasoning_tokens: u64,
     pub total_tokens: u64,
     pub queue_ms: u64,
     pub worker_ms: u64,
@@ -44,7 +43,6 @@ pub struct WorkerUsageRow {
     pub error_count: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
-    pub reasoning_tokens: u64,
     pub total_tokens: u64,
     pub queue_ms: u64,
     pub worker_ms: u64,
@@ -74,8 +72,8 @@ impl UsageTrackingDb {
         let mut statement = transaction
             .prepare(
                 "INSERT INTO usage_tracking \
-                 (usage_identity, key_id, key_name, model, usage_day, request_count, success_count, error_count, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens, queue_ms, worker_ms, total_ms, duration_ms) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
+                 (usage_identity, key_id, key_name, model, usage_day, request_count, success_count, error_count, prompt_tokens, completion_tokens, total_tokens, queue_ms, worker_ms, total_ms, duration_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
                  ON CONFLICT(usage_identity, model, usage_day) DO UPDATE SET \
                      key_id = excluded.key_id, \
                      key_name = excluded.key_name, \
@@ -83,7 +81,6 @@ impl UsageTrackingDb {
                      error_count = error_count + excluded.error_count, \
                      prompt_tokens = prompt_tokens + excluded.prompt_tokens, \
                      completion_tokens = completion_tokens + excluded.completion_tokens, \
-                     reasoning_tokens = reasoning_tokens + excluded.reasoning_tokens, \
                      total_tokens = total_tokens + excluded.total_tokens, \
                      queue_ms = queue_ms + excluded.queue_ms, \
                      worker_ms = worker_ms + excluded.worker_ms, \
@@ -96,14 +93,13 @@ impl UsageTrackingDb {
         let mut worker_statement = transaction
             .prepare(
                 "INSERT INTO worker_usage_tracking \
-                 (usage_day, worker_name, backend, model, request_count, success_count, error_count, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens, queue_ms, worker_ms, total_ms, duration_ms) \
-                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 (usage_day, worker_name, backend, model, request_count, success_count, error_count, prompt_tokens, completion_tokens, total_tokens, queue_ms, worker_ms, total_ms, duration_ms) \
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
                  ON CONFLICT(usage_day, worker_name, backend, model) DO UPDATE SET \
                      success_count = success_count + excluded.success_count, \
                      error_count = error_count + excluded.error_count, \
                      prompt_tokens = prompt_tokens + excluded.prompt_tokens, \
                      completion_tokens = completion_tokens + excluded.completion_tokens, \
-                     reasoning_tokens = reasoning_tokens + excluded.reasoning_tokens, \
                      total_tokens = total_tokens + excluded.total_tokens, \
                      queue_ms = queue_ms + excluded.queue_ms, \
                      worker_ms = worker_ms + excluded.worker_ms, \
@@ -131,7 +127,6 @@ impl UsageTrackingDb {
                     error_count,
                     event.prompt_tokens,
                     event.completion_tokens,
-                    event.reasoning_tokens,
                     event.total_tokens,
                     event.queue_ms,
                     event.worker_ms,
@@ -149,7 +144,6 @@ impl UsageTrackingDb {
                     error_count,
                     event.prompt_tokens,
                     event.completion_tokens,
-                    event.reasoning_tokens,
                     event.total_tokens,
                     event.queue_ms,
                     event.worker_ms,
@@ -173,7 +167,7 @@ impl UsageTrackingDb {
             .map_err(|_| io::Error::other("usage database mutex poisoned"))?;
         let mut statement = connection
             .prepare(
-                "SELECT usage_day, key_id, key_name, model, request_count, success_count, error_count, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens, queue_ms, worker_ms, total_ms, duration_ms
+                "SELECT usage_day, key_id, key_name, model, request_count, success_count, error_count, prompt_tokens, completion_tokens, total_tokens, queue_ms, worker_ms, total_ms, duration_ms
                  FROM usage_tracking
                  WHERE usage_day = ?1
                  ORDER BY key_name ASC, model ASC",
@@ -191,12 +185,11 @@ impl UsageTrackingDb {
                     error_count: row.get(6)?,
                     prompt_tokens: row.get(7)?,
                     completion_tokens: row.get(8)?,
-                    reasoning_tokens: row.get(9)?,
-                    total_tokens: row.get(10)?,
-                    queue_ms: row.get(11)?,
-                    worker_ms: row.get(12)?,
-                    total_ms: row.get(13)?,
-                    duration_ms: row.get(14)?,
+                    total_tokens: row.get(9)?,
+                    queue_ms: row.get(10)?,
+                    worker_ms: row.get(11)?,
+                    total_ms: row.get(12)?,
+                    duration_ms: row.get(13)?,
                 })
             })
             .map_err(to_io_error)?;
@@ -221,7 +214,7 @@ impl UsageTrackingDb {
 
         let mut usage_statement = connection
             .prepare(
-                "SELECT usage_day, key_id, key_name, model, request_count, success_count, error_count, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens, queue_ms, worker_ms, total_ms, duration_ms
+                "SELECT usage_day, key_id, key_name, model, request_count, success_count, error_count, prompt_tokens, completion_tokens, total_tokens, queue_ms, worker_ms, total_ms, duration_ms
                  FROM usage_tracking
                  WHERE usage_day >= ?1 AND usage_day <= ?2
                  ORDER BY usage_day ASC, key_name ASC, model ASC",
@@ -237,7 +230,7 @@ impl UsageTrackingDb {
 
         let mut worker_statement = connection
             .prepare(
-                "SELECT usage_day, worker_name, backend, model, request_count, success_count, error_count, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens, queue_ms, worker_ms, total_ms, duration_ms
+                "SELECT usage_day, worker_name, backend, model, request_count, success_count, error_count, prompt_tokens, completion_tokens, total_tokens, queue_ms, worker_ms, total_ms, duration_ms
                  FROM worker_usage_tracking
                  WHERE usage_day >= ?1 AND usage_day <= ?2
                  ORDER BY usage_day ASC, worker_name ASC, backend ASC, model ASC",
@@ -266,12 +259,11 @@ fn daily_usage_row(row: &rusqlite::Row<'_>) -> Result<DailyUsageRow, SqlError> {
         error_count: row.get(6)?,
         prompt_tokens: row.get(7)?,
         completion_tokens: row.get(8)?,
-        reasoning_tokens: row.get(9)?,
-        total_tokens: row.get(10)?,
-        queue_ms: row.get(11)?,
-        worker_ms: row.get(12)?,
-        total_ms: row.get(13)?,
-        duration_ms: row.get(14)?,
+        total_tokens: row.get(9)?,
+        queue_ms: row.get(10)?,
+        worker_ms: row.get(11)?,
+        total_ms: row.get(12)?,
+        duration_ms: row.get(13)?,
     })
 }
 
@@ -286,12 +278,11 @@ fn worker_usage_row(row: &rusqlite::Row<'_>) -> Result<WorkerUsageRow, SqlError>
         error_count: row.get(6)?,
         prompt_tokens: row.get(7)?,
         completion_tokens: row.get(8)?,
-        reasoning_tokens: row.get(9)?,
-        total_tokens: row.get(10)?,
-        queue_ms: row.get(11)?,
-        worker_ms: row.get(12)?,
-        total_ms: row.get(13)?,
-        duration_ms: row.get(14)?,
+        total_tokens: row.get(9)?,
+        queue_ms: row.get(10)?,
+        worker_ms: row.get(11)?,
+        total_ms: row.get(12)?,
+        duration_ms: row.get(13)?,
     })
 }
 
@@ -330,7 +321,6 @@ fn create_usage_tracking_schema(connection: &Connection) -> Result<(), SqlError>
             error_count INTEGER NOT NULL DEFAULT 0,
             prompt_tokens INTEGER NOT NULL DEFAULT 0,
             completion_tokens INTEGER NOT NULL DEFAULT 0,
-            reasoning_tokens INTEGER NOT NULL DEFAULT 0,
             total_tokens INTEGER NOT NULL DEFAULT 0,
             queue_ms INTEGER NOT NULL DEFAULT 0,
             worker_ms INTEGER NOT NULL DEFAULT 0,
@@ -361,7 +351,6 @@ fn ensure_usage_tracking_columns(
     for (column, definition) in [
         ("success_count", "INTEGER NOT NULL DEFAULT 0"),
         ("error_count", "INTEGER NOT NULL DEFAULT 0"),
-        ("reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
         ("total_tokens", "INTEGER NOT NULL DEFAULT 0"),
         ("queue_ms", "INTEGER NOT NULL DEFAULT 0"),
         ("worker_ms", "INTEGER NOT NULL DEFAULT 0"),
@@ -377,7 +366,7 @@ fn ensure_usage_tracking_columns(
     connection.execute(
         "UPDATE usage_tracking
          SET success_count = CASE WHEN success_count = 0 AND error_count = 0 THEN request_count ELSE success_count END,
-             total_tokens = CASE WHEN total_tokens = 0 THEN prompt_tokens + completion_tokens + reasoning_tokens ELSE total_tokens END,
+             total_tokens = CASE WHEN total_tokens = 0 THEN prompt_tokens + completion_tokens ELSE total_tokens END,
              worker_ms = CASE WHEN worker_ms = 0 THEN duration_ms ELSE worker_ms END,
              total_ms = CASE WHEN total_ms = 0 THEN duration_ms ELSE total_ms END",
         [],
@@ -398,7 +387,6 @@ fn create_worker_usage_tracking_schema(connection: &Connection) -> Result<(), Sq
             error_count INTEGER NOT NULL DEFAULT 0,
             prompt_tokens INTEGER NOT NULL DEFAULT 0,
             completion_tokens INTEGER NOT NULL DEFAULT 0,
-            reasoning_tokens INTEGER NOT NULL DEFAULT 0,
             total_tokens INTEGER NOT NULL DEFAULT 0,
             queue_ms INTEGER NOT NULL DEFAULT 0,
             worker_ms INTEGER NOT NULL DEFAULT 0,
@@ -431,7 +419,6 @@ fn migrate_usage_tracking_to_identity_schema(
             error_count INTEGER NOT NULL DEFAULT 0,
             prompt_tokens INTEGER NOT NULL DEFAULT 0,
             completion_tokens INTEGER NOT NULL DEFAULT 0,
-            reasoning_tokens INTEGER NOT NULL DEFAULT 0,
             total_tokens INTEGER NOT NULL DEFAULT 0,
             queue_ms INTEGER NOT NULL DEFAULT 0,
             worker_ms INTEGER NOT NULL DEFAULT 0,
@@ -455,7 +442,7 @@ fn migrate_usage_tracking_to_identity_schema(
         "INSERT INTO usage_tracking_v2 (
             id, usage_identity, key_id, key_name, model, usage_day,
             request_count, success_count, error_count, prompt_tokens, completion_tokens,
-            reasoning_tokens, total_tokens, queue_ms, worker_ms, total_ms, duration_ms
+            total_tokens, queue_ms, worker_ms, total_ms, duration_ms
          )
          SELECT
             id,
@@ -469,7 +456,6 @@ fn migrate_usage_tracking_to_identity_schema(
             0,
             prompt_tokens,
             completion_tokens,
-            0,
             prompt_tokens + completion_tokens,
             0,
             duration_ms,
@@ -483,7 +469,6 @@ fn migrate_usage_tracking_to_identity_schema(
             error_count = error_count + excluded.error_count,
             prompt_tokens = prompt_tokens + excluded.prompt_tokens,
             completion_tokens = completion_tokens + excluded.completion_tokens,
-            reasoning_tokens = reasoning_tokens + excluded.reasoning_tokens,
             total_tokens = total_tokens + excluded.total_tokens,
             queue_ms = queue_ms + excluded.queue_ms,
             worker_ms = worker_ms + excluded.worker_ms,
@@ -613,7 +598,6 @@ mod tests {
             status_code: 200,
             prompt_tokens,
             completion_tokens,
-            reasoning_tokens: 0,
             total_tokens: prompt_tokens + completion_tokens,
             queue_ms: 0,
             worker_ms: duration_ms,

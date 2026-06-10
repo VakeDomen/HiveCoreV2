@@ -179,7 +179,6 @@ struct UsageSummary {
     error_count: u64,
     prompt_tokens: u64,
     completion_tokens: u64,
-    reasoning_tokens: u64,
     total_tokens: u64,
     queue_ms: u64,
     worker_ms: u64,
@@ -195,7 +194,6 @@ impl UsageSummary {
             row.error_count,
             row.prompt_tokens,
             row.completion_tokens,
-            row.reasoning_tokens,
             row.total_tokens,
             row.queue_ms,
             row.worker_ms,
@@ -211,7 +209,6 @@ impl UsageSummary {
             row.error_count,
             row.prompt_tokens,
             row.completion_tokens,
-            row.reasoning_tokens,
             row.total_tokens,
             row.queue_ms,
             row.worker_ms,
@@ -228,7 +225,6 @@ impl UsageSummary {
         error_count: u64,
         prompt_tokens: u64,
         completion_tokens: u64,
-        reasoning_tokens: u64,
         total_tokens: u64,
         queue_ms: u64,
         worker_ms: u64,
@@ -240,7 +236,6 @@ impl UsageSummary {
         self.error_count += error_count;
         self.prompt_tokens += prompt_tokens;
         self.completion_tokens += completion_tokens;
-        self.reasoning_tokens += reasoning_tokens;
         self.total_tokens += total_tokens;
         self.queue_ms += queue_ms;
         self.worker_ms += worker_ms;
@@ -255,7 +250,6 @@ impl UsageSummary {
             "errors": self.error_count,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
-            "reasoning_tokens": self.reasoning_tokens,
             "total_tokens": self.total_tokens,
             "queue_ms": self.queue_ms,
             "worker_ms": self.worker_ms,

@@ -536,7 +536,6 @@ mod tests {
                 error_count: 0,
                 prompt_tokens: 17,
                 completion_tokens: 5,
-                reasoning_tokens: 0,
                 total_tokens: 22,
                 queue_ms: 0,
                 worker_ms: 35,

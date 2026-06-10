@@ -339,7 +339,6 @@ fn handle_poll(
             let tu = token_usage.unwrap_or(TokenUsage {
                 prompt_tokens: 0,
                 completion_tokens: 0,
-                reasoning_tokens: 0,
                 total_tokens: 0,
             });
             let model = task.context.model.clone().unwrap_or_default();
@@ -375,7 +374,6 @@ fn handle_poll(
                 status_code,
                 prompt_tokens: tu.prompt_tokens,
                 completion_tokens: tu.completion_tokens,
-                reasoning_tokens: tu.reasoning_tokens,
                 total_tokens: tu.total_tokens,
                 queue_ms,
                 worker_ms,
@@ -943,7 +941,6 @@ mod tests {
             Some(TokenUsage {
                 prompt_tokens: 9,
                 completion_tokens: 4,
-                reasoning_tokens: 0,
                 total_tokens: 13,
             })
         );
@@ -1047,7 +1044,6 @@ mod tests {
             Some(TokenUsage {
                 prompt_tokens: 9,
                 completion_tokens: 4,
-                reasoning_tokens: 0,
                 total_tokens: 13,
             })
         );
@@ -1084,7 +1080,6 @@ mod tests {
             Some(TokenUsage {
                 prompt_tokens: 11,
                 completion_tokens: 3,
-                reasoning_tokens: 0,
                 total_tokens: 14,
             })
         );

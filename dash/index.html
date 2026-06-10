@@ -92,6 +92,9 @@
                     <button class="nav-button admin-only" data-view="workers">
                         Workers
                     </button>
+                    <button class="nav-button admin-only" data-view="stats">
+                        Stats
+                    </button>
                     <button class="nav-button" data-view="api">API</button>
                 </nav>
             </aside>
@@ -403,6 +406,82 @@ What's the meaning of life?</textarea
                             </select>
                             <button class="danger" type="submit">Send</button>
                         </form>
+                    </section>
+                </section>
+
+                <section id="stats-view" class="view">
+                    <section class="panel">
+                        <div class="panel-head stats-head">
+                            <div>
+                                <h3>Usage Stats</h3>
+                                <p class="panel-subtitle">
+                                    Requests, tokens, time, and worker load from captured usage counters.
+                                </p>
+                            </div>
+                            <form id="usage-range-form" class="usage-range-form">
+                                <select id="usage-preset">
+                                    <option value="today">Today</option>
+                                    <option value="yesterday">Yesterday</option>
+                                    <option value="7d">Last 7 days</option>
+                                    <option value="30d">Last 30 days</option>
+                                    <option value="custom">Custom</option>
+                                </select>
+                                <input id="usage-from" type="date" />
+                                <input id="usage-to" type="date" />
+                                <button class="primary" type="submit">Load</button>
+                            </form>
+                        </div>
+                        <div id="usage-status" class="inline-status">
+                            No usage loaded.
+                        </div>
+                        <div id="usage-summary" class="usage-summary-grid"></div>
+                    </section>
+
+                    <div class="stats-layout">
+                        <section class="panel">
+                            <div class="panel-head">
+                                <h3>Daily Trend</h3>
+                            </div>
+                            <div id="usage-days" class="usage-bars"></div>
+                        </section>
+                        <section class="panel">
+                            <div class="panel-head">
+                                <div>
+                                    <h3>Worker Backends</h3>
+                                    <p class="panel-subtitle">
+                                        Available for requests recorded after worker tracking was enabled.
+                                    </p>
+                                </div>
+                            </div>
+                            <div id="usage-backends" class="usage-bars"></div>
+                        </section>
+                    </div>
+
+                    <div class="stats-layout">
+                        <section class="panel">
+                            <div class="panel-head">
+                                <h3>Clients</h3>
+                            </div>
+                            <div id="usage-keys" class="table-wrap"></div>
+                        </section>
+                        <section class="panel">
+                            <div class="panel-head">
+                                <h3>Models</h3>
+                            </div>
+                            <div id="usage-models" class="table-wrap"></div>
+                        </section>
+                    </div>
+
+                    <section class="panel">
+                        <div class="panel-head">
+                            <div>
+                                <h3>Worker Usage</h3>
+                                <p class="panel-subtitle">
+                                    Split by worker, backend, day, and model for newly tracked requests.
+                                </p>
+                            </div>
+                        </div>
+                        <div id="usage-workers" class="table-wrap"></div>
                     </section>
                 </section>
 

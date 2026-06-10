@@ -7,6 +7,9 @@ const state = {
   lastRequest: null,
   keyRoleFilter: "all",
   workerModelFilter: "",
+  usagePreset: "today",
+  usageFrom: "",
+  usageTo: "",
   refreshTimer: null,
   refreshIntervalMs: 0,
   data: {
@@ -19,6 +22,7 @@ const state = {
     queue: null,
     ollamaTags: null,
     openaiModels: null,
+    usage: null,
   },
 };
 
@@ -174,6 +178,18 @@ function bindEvents() {
     state.workerModelFilter = $("#worker-model-filter").value.trim();
     renderWorkers();
   });
+  $("#usage-range-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    state.usagePreset = $("#usage-preset").value;
+    state.usageFrom = $("#usage-from").value;
+    state.usageTo = $("#usage-to").value;
+    await loadUsage();
+  });
+  $("#usage-preset").addEventListener("change", async () => {
+    state.usagePreset = $("#usage-preset").value;
+    applyUsagePreset();
+    await loadUsage();
+  });
   $("#prompt-form").addEventListener("submit", runPrompt);
   $("#model-console-mode").addEventListener("change", () => {
     if (state.selectedModel) {
@@ -206,12 +222,7 @@ async function connect() {
     state.refreshIntervalMs = Number($("#refresh-interval").value || 5000);
     state.data.keys = adminProbe.body;
     setStatus("Connected as admin.");
-    await Promise.all([
-      loadWorkers(),
-      loadQueue(),
-      loadOllamaTags(),
-      loadOpenAiModels(),
-    ]);
+    await Promise.all([loadWorkers(), loadQueue(), loadOllamaTags(), loadOpenAiModels()]);
   } else {
     const modelProbe = await api("proxy", "/api/tags", {
       expected: [200, 401, 403, 404, 500],
@@ -250,6 +261,7 @@ function resetData() {
     queue: null,
     ollamaTags: null,
     openaiModels: null,
+    usage: null,
   };
   state.selectedModel = null;
   state.lastRequest = null;
@@ -270,7 +282,7 @@ function renderRole() {
     element.classList.toggle("hidden", !state.admin);
   });
   renderApiSurface();
-  if (!state.admin && ["keys", "workers"].includes(currentView())) {
+  if (!state.admin && ["keys", "workers", "stats"].includes(currentView())) {
     showView("overview");
   }
 }
@@ -325,6 +337,7 @@ async function refreshCurrentView(options = {}) {
       loadWorkers({ quiet: true }),
       loadQueue({ quiet: true }),
     ]);
+  if (view === "stats" && state.admin) await loadUsage({ quiet: true });
   renderAll();
   if (!options.soft) setStatus("Refreshed.");
 }
@@ -357,6 +370,21 @@ async function loadQueue() {
   renderQueue();
 }
 
+async function loadUsage() {
+  if (!state.admin) return;
+  ensureUsageRange();
+  const query = `?from=${encodeURIComponent(state.usageFrom)}&to=${encodeURIComponent(state.usageTo)}`;
+  const response = await api("management", `/usage${query}`, {
+    expected: [200, 400, 500],
+  });
+  if (response.status !== 200) {
+    state.data.usage = { error: response.body || response.status };
+  } else {
+    state.data.usage = response.body;
+  }
+  renderStats();
+}
+
 async function loadOllamaTags() {
   const response = await api("proxy", "/api/tags", {
     expected: [200, 404, 500],
@@ -387,6 +415,7 @@ function renderAll() {
     renderKeys();
     renderWorkers();
     renderQueue();
+    renderStats();
   }
 }
 
@@ -746,6 +775,246 @@ function renderQueue() {
   renderOverview();
 }
 
+function ensureUsageRange() {
+  if (!state.usagePreset) state.usagePreset = "today";
+  if (!state.usageFrom || !state.usageTo) applyUsagePreset(false);
+}
+
+function applyUsagePreset(updateControls = true) {
+  const today = localDateString(new Date());
+  const date = new Date(`${today}T00:00:00`);
+  let from = today;
+  let to = today;
+
+  if (state.usagePreset === "yesterday") {
+    date.setDate(date.getDate() - 1);
+    from = localDateString(date);
+    to = from;
+  } else if (state.usagePreset === "7d") {
+    date.setDate(date.getDate() - 6);
+    from = localDateString(date);
+  } else if (state.usagePreset === "30d") {
+    date.setDate(date.getDate() - 29);
+    from = localDateString(date);
+  } else if (state.usagePreset === "custom") {
+    from = state.usageFrom || today;
+    to = state.usageTo || today;
+  }
+
+  state.usageFrom = from;
+  state.usageTo = to;
+  if (updateControls) syncUsageControls();
+}
+
+function syncUsageControls() {
+  const preset = $("#usage-preset");
+  if (!preset) return;
+  preset.value = state.usagePreset || "today";
+  $("#usage-from").value = state.usageFrom || "";
+  $("#usage-to").value = state.usageTo || "";
+  const custom = state.usagePreset === "custom";
+  $("#usage-from").disabled = !custom;
+  $("#usage-to").disabled = !custom;
+}
+
+function renderStats() {
+  if (!state.admin) return;
+  ensureUsageRange();
+  syncUsageControls();
+  const usage = state.data.usage;
+  if (!usage) {
+    $("#usage-status").textContent = "No usage loaded.";
+    $("#usage-summary").innerHTML = "";
+    $("#usage-days").innerHTML = mutedBlock("Load usage stats.");
+    $("#usage-backends").innerHTML = mutedBlock("Load usage stats.");
+    $("#usage-keys").innerHTML = empty();
+    $("#usage-models").innerHTML = empty();
+    $("#usage-workers").innerHTML = empty();
+    return;
+  }
+  if (usage.error) {
+    $("#usage-status").textContent = `Usage unavailable: ${stringifyError(usage.error)}`;
+    $("#usage-summary").innerHTML = "";
+    $("#usage-days").innerHTML = mutedBlock("No usage available.");
+    $("#usage-backends").innerHTML = mutedBlock("No backend usage available.");
+    $("#usage-keys").innerHTML = empty();
+    $("#usage-models").innerHTML = empty();
+    $("#usage-workers").innerHTML = empty();
+    return;
+  }
+
+  const summary = usage.summary || {};
+  const requests = statValue(summary, "requests");
+  const errors = statValue(summary, "errors");
+  const totalMs = statDuration(summary);
+  const outputTokens = statValue(summary, "completion_tokens");
+  const totalTokens = statTotalTokens(summary);
+  const errorRate = requests ? `${formatRate((errors / requests) * 100)}%` : "-";
+  const outputTps = totalMs ? formatRate(outputTokens / (totalMs / 1000)) : "-";
+  const totalTps = totalMs ? formatRate(totalTokens / (totalMs / 1000)) : "-";
+
+  $("#usage-status").textContent =
+    `Showing ${usage.from || state.usageFrom} through ${usage.to || state.usageTo}.`;
+  $("#usage-summary").innerHTML = [
+    statCard("Requests", formatCount(requests), `${formatCount(statValue(summary, "success"))} ok`),
+    statCard("Errors", formatCount(errors), `${errorRate} error rate`, errors ? "bad" : "good"),
+    statCard("Input", formatCount(statValue(summary, "prompt_tokens")), "prompt tokens"),
+    statCard("Output", formatCount(outputTokens), "completion tokens"),
+    statCard("Total Tokens", formatCount(totalTokens), `${totalTps} tok/s`),
+    statCard("Worker Time", formatDuration(totalMs), `${outputTps} output tok/s`),
+    statCard("Queue Time", formatDuration(statValue(summary, "queue_ms")), "summed wait"),
+  ].join("");
+
+  renderUsageBars("#usage-days", usage.days || [], "day", "requests");
+  renderUsageBars("#usage-backends", usage.backends || [], "backend", "requests");
+  renderUsageKeys(usage.keys || []);
+  renderUsageModels(usage.models || []);
+  renderUsageWorkers(usage.workers || []);
+}
+
+function statCard(label, value, detail, tone = "") {
+  return `
+    <article class="usage-stat ${tone}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(detail || "")}</small>
+    </article>
+  `;
+}
+
+function renderUsageBars(selector, rows, labelField, valueField) {
+  const root = $(selector);
+  const sorted = [...rows].sort(
+    (a, b) => statValue(b, valueField) - statValue(a, valueField),
+  );
+  if (!sorted.length) {
+    root.innerHTML = mutedBlock("No usage in this range.");
+    return;
+  }
+  const max = Math.max(...sorted.map((row) => statValue(row, valueField)), 1);
+  root.innerHTML = sorted
+    .map((row) => {
+      const requests = statValue(row, "requests");
+      const width = Math.max(3, Math.round((requests / max) * 100));
+      const errors = statValue(row, "errors");
+      const totalMs = statDuration(row);
+      return `
+        <article class="usage-bar-row">
+          <div>
+            <strong>${escapeHtml(row[labelField] || "-")}</strong>
+            <span>${formatCount(requests)} req · ${formatCount(statTotalTokens(row))} tok · ${formatDuration(totalMs)}${errors ? ` · ${formatCount(errors)} err` : ""}</span>
+          </div>
+          <div class="usage-row-track"><span style="width: ${width}%"></span></div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function renderUsageKeys(rows) {
+  const sorted = sortStats(rows);
+  $("#usage-keys").innerHTML = sorted.length
+    ? table(
+        ["Client", "Req", "Err", "Input", "Output", "Total", "Time", "Out tok/s"],
+        sorted.map((row) => usageRowCells(row, row.key_name || `key ${row.key_id ?? "-"}`)),
+      )
+    : empty();
+}
+
+function renderUsageModels(rows) {
+  const sorted = sortStats(rows);
+  $("#usage-models").innerHTML = sorted.length
+    ? table(
+        ["Model", "Req", "Err", "Input", "Output", "Total", "Time", "Out tok/s"],
+        sorted.map((row) => usageRowCells(row, row.model || "-")),
+      )
+    : empty();
+}
+
+function renderUsageWorkers(rows) {
+  const sorted = sortStats(rows);
+  $("#usage-workers").innerHTML = sorted.length
+    ? table(
+        ["Worker", "Backend", "Req", "Err", "Model mix", "Input", "Output", "Total", "Time", "Out tok/s"],
+        sorted.map((row) => [
+          escapeHtml(row.worker_name || "-"),
+          escapeHtml(workerBackendLabel(row.backend || "-")),
+          formatCount(statValue(row, "requests")),
+          statValue(row, "errors") ? `<span class="error-text">${formatCount(statValue(row, "errors"))}</span>` : "0",
+          escapeHtml(workerModelMix(row.worker_name)),
+          formatCount(statValue(row, "prompt_tokens")),
+          formatCount(statValue(row, "completion_tokens")),
+          formatCount(statTotalTokens(row)),
+          formatDuration(statDuration(row)),
+          outputTokensPerSecond(row),
+        ]),
+      )
+    : empty();
+}
+
+function usageRowCells(row, label) {
+  return [
+    escapeHtml(label),
+    formatCount(statValue(row, "requests")),
+    statValue(row, "errors") ? `<span class="error-text">${formatCount(statValue(row, "errors"))}</span>` : "0",
+    formatCount(statValue(row, "prompt_tokens")),
+    formatCount(statValue(row, "completion_tokens")),
+    formatCount(statTotalTokens(row)),
+    formatDuration(statDuration(row)),
+    outputTokensPerSecond(row),
+  ];
+}
+
+function sortStats(rows) {
+  return [...rows].sort(
+    (a, b) =>
+      statDuration(b) - statDuration(a) ||
+      statValue(b, "requests") - statValue(a, "requests") ||
+      statTotalTokens(b) - statTotalTokens(a),
+  );
+}
+
+function workerModelMix(workerName) {
+  const rows = state.data.usage?.worker_rows || [];
+  const models = rows
+    .filter((row) => row.worker_name === workerName)
+    .sort((a, b) => statValue(b, "requests") - statValue(a, "requests"))
+    .slice(0, 3)
+    .map((row) => `${row.model} (${formatCount(statValue(row, "request_count"))})`);
+  return models.length ? models.join(", ") : "-";
+}
+
+function statValue(row, field) {
+  if (!row) return 0;
+  const aliases = {
+    requests: ["requests", "request_count"],
+    success: ["success", "success_count"],
+    errors: ["errors", "error_count"],
+  }[field] || [field];
+  for (const alias of aliases) {
+    const value = Number(row[alias]);
+    if (Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+
+function statTotalTokens(row) {
+  return (
+    statValue(row, "total_tokens") ||
+    statValue(row, "prompt_tokens") + statValue(row, "completion_tokens")
+  );
+}
+
+function statDuration(row) {
+  return statValue(row, "total_ms") || statValue(row, "duration_ms") || statValue(row, "worker_ms");
+}
+
+function outputTokensPerSecond(row) {
+  const seconds = statDuration(row) / 1000;
+  if (!seconds) return "-";
+  return formatRate(statValue(row, "completion_tokens") / seconds);
+}
+
 async function createKey(event) {
   event.preventDefault();
   const name = $("#new-key-name").value.trim();
@@ -1057,37 +1326,14 @@ function tokenBreakdown(request) {
     "outputTokens",
   ]);
   const total = usageNumber(usage, ["total_tokens", "totalTokens"]);
-  const explicitThinking =
-    usageNumber(usage, ["reasoning_tokens", "reasoningTokens", "thinking_tokens", "thinkingTokens"]) ??
-    usageNumber(usage.completion_tokens_details, [
-      "reasoning_tokens",
-      "reasoningTokens",
-      "thinking_tokens",
-      "thinkingTokens",
-    ]) ??
-    usageNumber(usage.output_tokens_details, [
-      "reasoning_tokens",
-      "reasoningTokens",
-      "thinking_tokens",
-      "thinkingTokens",
-    ]);
-  const inferredThinking =
-    total != null && prompt != null && completion != null
-      ? Math.max(total - prompt - completion, 0)
-      : null;
-  const thinking = explicitThinking ?? inferredThinking ?? 0;
   const backendGenerated = request.backendMetrics?.eval_count ?? null;
   const generated =
     total != null && prompt != null
       ? Math.max(total - prompt, completion ?? 0)
       : completion == null
         ? backendGenerated
-        : completion + thinking;
-  const visible =
-    completion != null && explicitThinking != null && thinking <= completion
-      ? Math.max(completion - thinking, 0)
-      : completion;
-  return { prompt, completion, thinking, generated, visible, total };
+        : completion;
+  return { prompt, completion, generated, visible: completion, total };
 }
 
 function usageNumber(value, names) {
@@ -1103,21 +1349,18 @@ function requestUsage(usage) {
   const tokens = tokenBreakdown({ usage });
   const prompt = tokens.prompt ?? 0;
   const completion = tokens.completion ?? 0;
-  const thinking = tokens.thinking ?? 0;
-  const total = tokens.total ?? prompt + completion + thinking;
+  const total = tokens.total ?? prompt + completion;
   const promptPercent = total ? Math.round((prompt / total) * 100) : 0;
   const completionPercent = total ? Math.round((completion / total) * 100) : 0;
-  const thinkingPercent = total ? Math.round((thinking / total) * 100) : 0;
   return `
     <section class="usage-card">
       <div class="usage-head">
         <h4>Token Usage</h4>
         <strong>${escapeHtml(String(total || "-"))}</strong>
       </div>
-      <div class="usage-bar" title="${prompt} prompt / ${completion} completion / ${thinking} thinking">
+      <div class="usage-bar" title="${prompt} prompt / ${completion} completion">
         <span class="prompt" style="width: ${promptPercent}%"></span>
         <span class="completion" style="width: ${completionPercent}%"></span>
-        <span class="thinking" style="width: ${thinkingPercent}%"></span>
       </div>
       <div class="usage-grid">
         <div>
@@ -1127,10 +1370,6 @@ function requestUsage(usage) {
         <div>
           <span>Completion</span>
           <strong>${escapeHtml(String(completion || "-"))}</strong>
-        </div>
-        <div>
-          <span>Thinking</span>
-          <strong>${escapeHtml(String(thinking || "-"))}</strong>
         </div>
         <div>
           <span>Total</span>
@@ -1610,6 +1849,37 @@ function formatRate(value) {
   if (number >= 100) return number.toFixed(0);
   if (number >= 10) return number.toFixed(1);
   return number.toFixed(2);
+}
+
+function formatCount(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  const abs = Math.abs(number);
+  if (abs >= 1_000_000_000) return `${formatRate(number / 1_000_000_000)}B`;
+  if (abs >= 1_000_000) return `${formatRate(number / 1_000_000)}M`;
+  if (abs >= 1_000) return `${formatRate(number / 1_000)}k`;
+  return Math.round(number).toLocaleString();
+}
+
+function formatDuration(value) {
+  const ms = Number(value);
+  if (!Number.isFinite(ms) || ms <= 0) return "-";
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 1) return `${Math.round(ms)}ms`;
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const restSeconds = seconds % 60;
+  if (minutes < 60) return `${minutes}m ${String(restSeconds).padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  return `${hours}h ${String(restMinutes).padStart(2, "0")}m`;
+}
+
+function localDateString(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function byteLength(value) {
