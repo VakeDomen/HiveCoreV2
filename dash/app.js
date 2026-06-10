@@ -4,7 +4,9 @@ const state = {
   role: "disconnected",
   admin: false,
   selectedModel: null,
+  lastRequest: null,
   keyRoleFilter: "all",
+  workerModelFilter: "",
   refreshTimer: null,
   refreshIntervalMs: 0,
   data: {
@@ -152,7 +154,8 @@ function bindEvents() {
     if (action === "load-keys") return loadKeys();
     if (action === "load-workers") return loadWorkers();
     if (action === "load-queue") return loadQueue();
-    if (action === "delete-key") return deleteKey(Number(event.target.dataset.id));
+    if (action === "delete-key")
+      return deleteKey(Number(event.target.dataset.id));
     if (action === "save-key") return saveKey(Number(event.target.dataset.id));
     if (action === "copy-token") return copyToken(event.target.dataset.token);
     if (action === "select-model") {
@@ -166,6 +169,10 @@ function bindEvents() {
 
   $("#create-key-form").addEventListener("submit", createKey);
   $("#worker-command-form").addEventListener("submit", sendWorkerCommand);
+  $("#worker-model-filter").addEventListener("input", () => {
+    state.workerModelFilter = $("#worker-model-filter").value.trim();
+    renderWorkers();
+  });
   $("#prompt-form").addEventListener("submit", runPrompt);
   $("#model-console-mode").addEventListener("change", () => {
     if (state.selectedModel) {
@@ -189,16 +196,25 @@ async function connect() {
   setLoginStatus("Checking key...");
   resetData();
 
-  const adminProbe = await api("management", "/key", { expected: [200, 403, 401] });
+  const adminProbe = await api("management", "/key", {
+    expected: [200, 403, 401],
+  });
   if (adminProbe.status === 200) {
     state.admin = true;
     state.role = "admin";
     state.refreshIntervalMs = Number($("#refresh-interval").value || 5000);
     state.data.keys = adminProbe.body;
     setStatus("Connected as admin.");
-    await Promise.all([loadWorkers(), loadQueue(), loadOllamaTags(), loadOpenAiModels()]);
+    await Promise.all([
+      loadWorkers(),
+      loadQueue(),
+      loadOllamaTags(),
+      loadOpenAiModels(),
+    ]);
   } else {
-    const modelProbe = await api("proxy", "/api/tags", { expected: [200, 401, 403, 404, 500] });
+    const modelProbe = await api("proxy", "/api/tags", {
+      expected: [200, 401, 403, 404, 500],
+    });
     if (modelProbe.status === 401 || modelProbe.status === 403) {
       state.admin = false;
       state.role = "disconnected";
@@ -235,13 +251,18 @@ function resetData() {
     openaiModels: null,
   };
   state.selectedModel = null;
+  state.lastRequest = null;
 }
 
 function renderRole() {
   const pill = $("#role-pill");
   pill.className = `pill ${state.role === "admin" ? "admin" : state.role === "client" ? "client" : ""}`;
   pill.textContent =
-    state.role === "admin" ? "Admin key" : state.role === "client" ? "Client key" : "Disconnected";
+    state.role === "admin"
+      ? "Admin key"
+      : state.role === "client"
+        ? "Client key"
+        : "Disconnected";
   $("#metric-role").textContent = state.role;
   $(".refresh-control").classList.toggle("hidden", !state.admin);
   $$(".admin-only").forEach((element) => {
@@ -292,9 +313,17 @@ async function refreshCurrentView(options = {}) {
       loadOpenAiModels({ quiet: true }),
     ]);
   }
-  if (view === "models") await Promise.all([loadOllamaTags({ quiet: true }), loadOpenAiModels({ quiet: true })]);
+  if (view === "models")
+    await Promise.all([
+      loadOllamaTags({ quiet: true }),
+      loadOpenAiModels({ quiet: true }),
+    ]);
   if (view === "keys" && state.admin) await loadKeys({ quiet: true });
-  if (view === "workers" && state.admin) await Promise.all([loadWorkers({ quiet: true }), loadQueue({ quiet: true })]);
+  if (view === "workers" && state.admin)
+    await Promise.all([
+      loadWorkers({ quiet: true }),
+      loadQueue({ quiet: true }),
+    ]);
   renderAll();
   if (!options.soft) setStatus("Refreshed.");
 }
@@ -328,14 +357,24 @@ async function loadQueue() {
 }
 
 async function loadOllamaTags() {
-  const response = await api("proxy", "/api/tags", { expected: [200, 404, 500] });
-  state.data.ollamaTags = response.status === 200 ? response.body : { error: response.body || response.status };
+  const response = await api("proxy", "/api/tags", {
+    expected: [200, 404, 500],
+  });
+  state.data.ollamaTags =
+    response.status === 200
+      ? response.body
+      : { error: response.body || response.status };
   renderModels();
 }
 
 async function loadOpenAiModels() {
-  const response = await api("proxy", "/v1/models", { expected: [200, 404, 500] });
-  state.data.openaiModels = response.status === 200 ? response.body : { error: response.body || response.status };
+  const response = await api("proxy", "/v1/models", {
+    expected: [200, 404, 500],
+  });
+  state.data.openaiModels =
+    response.status === 200
+      ? response.body
+      : { error: response.body || response.status };
   renderModels();
 }
 
@@ -354,21 +393,35 @@ function renderOverview() {
   const workerCount = Object.keys(state.data.workers || {}).length;
   const ollamaModels = extractOllamaModels(state.data.ollamaTags);
   const openaiModels = extractOpenAiModels(state.data.openaiModels);
-  const modelIds = new Set([
-    ...ollamaModels.map((model) => model.name || model.model || model),
-    ...openaiModels.map((model) => model.id || model),
-  ].filter(Boolean));
+  const modelIds = new Set(
+    [
+      ...ollamaModels.map((model) => model.name || model.model || model),
+      ...openaiModels.map((model) => model.id || model),
+    ].filter(Boolean),
+  );
   const queued = state.data.queue
-    ? Object.values(state.data.queue.model_queue || {}).reduce((sum, value) => sum + Number(value || 0), 0) +
-      Object.values(state.data.queue.node_queue || {}).reduce((sum, value) => sum + Number(value || 0), 0)
+    ? Object.values(state.data.queue.model_queue || {}).reduce(
+        (sum, value) => sum + Number(value || 0),
+        0,
+      ) +
+      Object.values(state.data.queue.node_queue || {}).reduce(
+        (sum, value) => sum + Number(value || 0),
+        0,
+      )
     : 0;
 
   $("#metric-workers").textContent = state.admin ? workerCount : "-";
   $("#metric-models").textContent = modelIds.size || "-";
   $("#metric-queued").textContent = state.admin ? queued : "-";
-  $("#overview-workers").closest(".panel").classList.toggle("hidden", !state.admin);
-  $("#overview-queues").closest(".panel").classList.toggle("hidden", !state.admin);
-  $("#overview-backends").closest(".panel").classList.toggle("hidden", !state.admin);
+  $("#overview-workers")
+    .closest(".panel")
+    .classList.toggle("hidden", !state.admin);
+  $("#overview-queues")
+    .closest(".panel")
+    .classList.toggle("hidden", !state.admin);
+  $("#overview-backends")
+    .closest(".panel")
+    .classList.toggle("hidden", !state.admin);
   renderOverviewWorkers();
   renderOverviewQueues(queued);
   renderOverviewBackends();
@@ -381,17 +434,13 @@ function renderOverviewWorkers() {
     root.innerHTML = "";
     return;
   }
-  const workers = Object.entries(state.data.workers || {}).sort(([a], [b]) => a.localeCompare(b));
+  const workers = workerNames();
   if (!workers.length) {
     root.innerHTML = mutedBlock("No connected workers.");
     return;
   }
-  const visible = workers.slice(0, 12).map(([name, worker]) => {
-    return overviewRow(name, `${worker.backend || "-"} · ${worker.state || "-"}`);
-  });
-  if (workers.length > 12) {
-    visible.push(overviewRow(`${workers.length - 12} more`, "Open Workers for the full list."));
-  }
+  const visible = workers.map((name) => overviewWorkerCard(name));
+  root.className = "overview-worker-grid";
   root.innerHTML = visible.join("");
 }
 
@@ -430,17 +479,32 @@ function renderOverviewBackends() {
   }
   const entries = Object.entries(counts).sort(([a], [b]) => a.localeCompare(b));
   root.innerHTML = entries.length
-    ? entries.map(([backend, count]) => overviewRow(backend, `${count} worker${count === 1 ? "" : "s"}`)).join("")
+    ? entries
+        .map(([backend, count]) =>
+          overviewRow(backend, `${count} worker${count === 1 ? "" : "s"}`),
+        )
+        .join("")
     : mutedBlock("No backend data.");
 }
 
 function renderOverviewModels(ollamaModels, openaiModels) {
   const root = $("#overview-models");
-  const embeddingCount = ollamaModels.filter((model) => defaultModeForModel(model) === "embedding").length;
+  const embeddingCount = ollamaModels.filter(
+    (model) => defaultModeForModel(model) === "embedding",
+  ).length;
   root.innerHTML = [
-    overviewRow("Ollama visible", `${ollamaModels.length} model${ollamaModels.length === 1 ? "" : "s"}`),
-    overviewRow("OpenAI visible", `${openaiModels.length} model${openaiModels.length === 1 ? "" : "s"}`),
-    overviewRow("Embedding-likely", `${embeddingCount} Ollama model${embeddingCount === 1 ? "" : "s"}`),
+    overviewRow(
+      "Ollama visible",
+      `${ollamaModels.length} model${ollamaModels.length === 1 ? "" : "s"}`,
+    ),
+    overviewRow(
+      "OpenAI visible",
+      `${openaiModels.length} model${openaiModels.length === 1 ? "" : "s"}`,
+    ),
+    overviewRow(
+      "Embedding-likely",
+      `${embeddingCount} Ollama model${embeddingCount === 1 ? "" : "s"}`,
+    ),
   ].join("");
 }
 
@@ -458,9 +522,20 @@ function mutedBlock(text) {
 }
 
 function renderModels() {
-  renderModelList("#ollama-models", "ollama", extractOllamaModels(state.data.ollamaTags), state.data.ollamaTags);
-  renderModelList("#openai-models", "openai", extractOpenAiModels(state.data.openaiModels), state.data.openaiModels);
+  renderModelList(
+    "#ollama-models",
+    "ollama",
+    extractOllamaModels(state.data.ollamaTags),
+    state.data.ollamaTags,
+  );
+  renderModelList(
+    "#openai-models",
+    "openai",
+    extractOpenAiModels(state.data.openaiModels),
+    state.data.openaiModels,
+  );
   renderModelConsole();
+  renderRequestInfo();
   renderOverview();
 }
 
@@ -505,14 +580,26 @@ function renderKeys() {
     return state.keyRoleFilter === "all" || key.role === state.keyRoleFilter;
   });
   $$("#key-role-tabs .tab").forEach((button) => {
-    button.classList.toggle("active", button.dataset.roleFilter === state.keyRoleFilter);
+    button.classList.toggle(
+      "active",
+      button.dataset.roleFilter === state.keyRoleFilter,
+    );
   });
   if (!keys.length) {
     $("#keys-table").innerHTML = empty();
     return;
   }
   $("#keys-table").innerHTML = table(
-    ["ID", "Name", "Token", "Role", "Capture", "Whitelist", "Blacklist", "Actions"],
+    [
+      "ID",
+      "Name",
+      "Token",
+      "Role",
+      "Capture",
+      "Whitelist",
+      "Blacklist",
+      "Actions",
+    ],
     keys.map((key) => [
       key.id,
       `<input data-key-name="${key.id}" value="${escapeAttr(key.name)}" />`,
@@ -529,18 +616,14 @@ function renderKeys() {
 
 function renderWorkers() {
   if (!state.admin) return;
-  const names = Array.from(
-    new Set([
-      ...Object.keys(state.data.workers || {}),
-      ...Object.keys(state.data.connections || {}),
-      ...Object.keys(state.data.pings || {}),
-      ...Object.keys(state.data.tags || {}),
-      ...Object.keys(state.data.versions || {}),
-    ]),
-  ).sort();
+  const names = workerNames()
+    .filter((name) => workerMatchesModelFilter(name, state.workerModelFilter))
+    .sort((a, b) => a.localeCompare(b));
 
   if (!names.length) {
-    $("#workers-grid").innerHTML = empty();
+    $("#workers-grid").innerHTML = state.workerModelFilter
+      ? `<div class="list-empty">No workers match this model filter.</div>`
+      : empty();
     return;
   }
 
@@ -558,41 +641,101 @@ function renderWorkers() {
     </div>
     ${names
       .map((name) => {
-      const worker = state.data.workers[name] || {};
-      const connection = state.data.connections[name] || {};
-      const ping = state.data.pings[name] || {};
-      const version = state.data.versions[name] || {};
-      const models = state.data.tags[name] || [];
-      const connections = Number(connection.connections || 1);
-      const workingConnections = Number(connection.working_connections || 0);
-      const isWorking = workingConnections > 0;
-      const workingPercent = connections ? Math.round((workingConnections / connections) * 100) : 0;
-      return `
-        <article class="worker-card ${isWorking ? "working" : "idle"}">
+        const worker = state.data.workers[name] || {};
+        const connection = state.data.connections[name] || {};
+        const ping = state.data.pings[name] || {};
+        const version = state.data.versions[name] || {};
+        const models = state.data.tags[name] || [];
+        const load = workerLoad(name);
+        const pollMs = Number(ping.last_poll_ms);
+        return `
+        <article class="worker-card ${load.className}">
           <div class="worker-card-head">
             <strong>${escapeHtml(name)}</strong>
-            <span>${escapeHtml(connection.state || worker.state || "-")}</span>
+            <span>${escapeHtml(workerBackendLabel(connection.backend || worker.backend || version.backend || "-"))}</span>
           </div>
-          <div class="worker-meta">
-            <span>Type</span>
-            <strong>${escapeHtml(connection.backend || worker.backend || version.backend || "-")}</strong>
-          </div>
-          <div class="worker-meta">
-            <span>Connections</span>
-            <strong>${connections}</strong>
-          </div>
-          <div class="worker-bar" title="${workingConnections}/${connections} working">
-            <span style="width: ${workingPercent}%"></span>
+          <div class="worker-bar" title="${load.working}/${load.total} working">
+            <span style="width: ${load.percent}%"></span>
           </div>
           <div class="worker-foot">
-            <span>${workingConnections}/${connections} working</span>
-            <span>poll ${formatMs(ping.last_poll_ms)}</span>
+            <span>${load.working}/${load.total} working</span>
+            ${Number.isFinite(pollMs) && pollMs > 10_000 ? `<span>poll ${formatMs(pollMs)}</span>` : ""}
           </div>
-          <div class="worker-models">${tags(models.slice(0, 8))}</div>
+          <div class="worker-models">${tags(models)}</div>
         </article>
       `;
-    })
+      })
       .join("")}
+  `;
+}
+
+function workerBackendLabel(value) {
+  if (value === "ollama_legacy") return "legacy_ollama";
+  return value || "-";
+}
+
+function workerNames() {
+  const names = Array.from(
+    new Set([
+      ...Object.keys(state.data.workers || {}),
+      ...Object.keys(state.data.connections || {}),
+      ...Object.keys(state.data.pings || {}),
+      ...Object.keys(state.data.tags || {}),
+      ...Object.keys(state.data.versions || {}),
+    ]),
+  );
+  names.sort((a, b) => {
+    const aLoad = workerLoad(a);
+    const bLoad = workerLoad(b);
+    return (
+      bLoad.working - aLoad.working ||
+      bLoad.percent - aLoad.percent ||
+      a.localeCompare(b)
+    );
+  });
+  return names;
+}
+
+function workerMatchesModelFilter(name, filter) {
+  if (!filter) return true;
+  const needle = filter.toLowerCase();
+  return (state.data.tags[name] || []).some((model) =>
+    String(model).toLowerCase().includes(needle),
+  );
+}
+
+function workerLoad(name) {
+  const connection = state.data.connections[name] || {};
+  const total = Number(connection.connections || 1);
+  const working = Number(connection.working_connections || 0);
+  const percent = total ? Math.round((working / total) * 100) : 0;
+  return {
+    total,
+    working,
+    percent,
+    className: workerLoadClass(percent),
+  };
+}
+
+function workerLoadClass(percent) {
+  if (percent >= 100) return "load-red";
+  if (percent > 50) return "load-yellow";
+  if (percent > 0) return "load-green";
+  return "load-gray";
+}
+
+function overviewWorkerCard(name) {
+  const load = workerLoad(name);
+  return `
+    <article class="overview-worker-card ${load.className}">
+      <div class="overview-worker-head">
+        <strong>${escapeHtml(name)}</strong>
+        <span>${load.working}/${load.total}</span>
+      </div>
+      <div class="worker-bar" title="${load.working}/${load.total} working">
+        <span style="width: ${load.percent}%"></span>
+      </div>
+    </article>
   `;
 }
 
@@ -618,8 +761,10 @@ async function createKey(event) {
     body: payload,
     expected: [201, 400, 409, 500],
   });
-  if (response.status !== 201) return setStatus(`Create failed: ${response.status}`, true);
-  $("#created-token").innerHTML = `Created token: <code>${escapeHtml(response.body.token)}</code>`;
+  if (response.status !== 201)
+    return setStatus(`Create failed: ${response.status}`, true);
+  $("#created-token").innerHTML =
+    `Created token: <code>${escapeHtml(response.body.token)}</code>`;
   $("#create-key-form").reset();
   $("#new-key-capture").checked = true;
   await loadKeys();
@@ -655,7 +800,8 @@ async function saveKey(id) {
     body: { id, name, capture },
     expected: [200, 400, 404, 409, 500],
   });
-  if (response.status !== 200) return setStatus(`Save failed: ${response.status}`, true);
+  if (response.status !== 200)
+    return setStatus(`Save failed: ${response.status}`, true);
   setStatus("Key updated.");
   await loadKeys();
 }
@@ -667,7 +813,8 @@ async function deleteKey(id) {
     body: { id },
     expected: [204, 404, 500],
   });
-  if (response.status !== 204) return setStatus(`Delete failed: ${response.status}`, true);
+  if (response.status !== 204)
+    return setStatus(`Delete failed: ${response.status}`, true);
   setStatus("Key deleted.");
   await loadKeys();
 }
@@ -682,7 +829,12 @@ async function sendWorkerCommand(event) {
     body: { worker, command },
     expected: [202, 400, 500],
   });
-  setStatus(response.status === 202 ? "Worker command queued." : `Command failed: ${response.status}`, response.status !== 202);
+  setStatus(
+    response.status === 202
+      ? "Worker command queued."
+      : `Command failed: ${response.status}`,
+    response.status !== 202,
+  );
 }
 
 function selectModel(source, name, defaultMode) {
@@ -691,9 +843,11 @@ function selectModel(source, name, defaultMode) {
     name,
     mode: defaultMode || "chat",
   };
+  state.lastRequest = null;
   $("#model-console-mode").disabled = false;
   $("#model-run-button").disabled = false;
   renderModelConsole();
+  renderRequestInfo();
   setPromptOutput("Response will appear here.", true);
 }
 
@@ -701,15 +855,331 @@ function renderModelConsole() {
   const selected = state.selectedModel;
   if (!selected) {
     $("#model-console-title").textContent = "Select a model";
-    $("#model-console-subtitle").textContent = "Choose a model from either list.";
+    $("#model-console-subtitle").textContent =
+      "Choose a model from either list.";
     $("#model-console-mode").disabled = true;
     $("#model-run-button").disabled = true;
+    renderRequestInfo();
     return;
   }
   $("#model-console-title").textContent = selected.name;
   $("#model-console-subtitle").textContent =
-    selected.source === "ollama" ? "Ollama native endpoints" : "OpenAI-compatible endpoints";
+    selected.source === "ollama"
+      ? "Ollama native endpoints"
+      : "OpenAI-compatible endpoints";
   $("#model-console-mode").value = selected.mode;
+}
+
+function beginRequest(selected, path, method, body, input) {
+  const bodyText = JSON.stringify(body);
+  state.lastRequest = {
+    id: Date.now(),
+    state: "running",
+    source: selected.source,
+    mode: selected.mode,
+    model: selected.name,
+    method,
+    path,
+    status: null,
+    startedAt: new Date(),
+    finishedAt: null,
+    durationMs: null,
+    ttftMs: null,
+    promptChars: input.length,
+    requestBytes: byteLength(bodyText),
+    requestBody: body,
+    responseBytes: 0,
+    responseChars: 0,
+    chunks: 0,
+    streamEvents: 0,
+    usage: null,
+    backendMetrics: null,
+    lastEvent: null,
+    responseHeaders: null,
+    error: null,
+  };
+  renderRequestInfo();
+}
+
+function updateRequest(patch) {
+  if (!state.lastRequest) return;
+  state.lastRequest = { ...state.lastRequest, ...patch };
+  if (state.lastRequest.state === "running") {
+    state.lastRequest.durationMs = Date.now() - state.lastRequest.startedAt.getTime();
+  }
+  renderRequestInfo();
+}
+
+function finishRequest(result) {
+  if (!state.lastRequest || state.lastRequest.state !== "running") return;
+  const finishedAt = new Date();
+  state.lastRequest = {
+    ...state.lastRequest,
+    state: result,
+    finishedAt,
+    durationMs: finishedAt.getTime() - state.lastRequest.startedAt.getTime(),
+  };
+  renderRequestInfo();
+}
+
+function renderRequestInfo() {
+  const request = state.lastRequest;
+  const root = $("#request-info");
+  const pill = $("#request-state-pill");
+  if (!root || !pill) return;
+  if (!request) {
+    pill.className = "mini-pill";
+    pill.textContent = "Idle";
+    root.innerHTML = `<div class="list-empty compact-empty">No request yet.</div>`;
+    return;
+  }
+
+  pill.className = `mini-pill ${request.state}`;
+  pill.textContent = titleCase(request.state);
+  root.innerHTML = [
+    requestSummaryCards(request),
+    `<div class="request-card-grid">
+      ${requestSection("Route", [
+        ["Model", request.model],
+        ["Source", request.source],
+        ["Mode", request.mode],
+        ["Endpoint", `${request.method} ${request.path}`],
+        ["HTTP", request.status || "-"],
+      ])}
+      ${requestSection("Timing", [
+      ["Started", request.startedAt.toLocaleTimeString()],
+      ["Finished", request.finishedAt ? request.finishedAt.toLocaleTimeString() : "-"],
+      ["TTFT", request.ttftMs == null ? "-" : formatMs(request.ttftMs)],
+      ["Duration", request.durationMs == null ? "-" : formatMs(request.durationMs)],
+      ])}
+      ${requestSection("Payload", [
+        ["Prompt", `${request.promptChars.toLocaleString()} chars`],
+        ["Request", formatBytes(request.requestBytes)],
+        ["Response", formatBytes(request.responseBytes)],
+        ["Output", `${request.responseChars.toLocaleString()} chars`],
+        ["Chunks", request.chunks],
+        ["Events", request.streamEvents],
+      ])}
+      ${requestThroughput(request)}
+    </div>`,
+    request.usage ? requestUsage(request.usage) : "",
+    requestJsonSection("Request body", request.requestBody, false),
+    request.backendMetrics
+      ? requestJsonSection("Backend", request.backendMetrics, false)
+      : "",
+    request.responseHeaders
+      ? requestJsonSection("Response headers", request.responseHeaders, false)
+      : "",
+    request.error ? requestSection("Error", [["Message", request.error]]) : "",
+    request.lastEvent ? requestJsonSection("Last event", request.lastEvent, false) : "",
+  ].join("");
+}
+
+function requestSummaryCards(request) {
+  const tokens = tokenBreakdown(request).generated ?? "-";
+  const rates = requestRates(request);
+  return `
+    <section class="request-summary">
+      <article class="${request.status && request.status < 400 ? "good" : request.status ? "bad" : ""}">
+        <span>Status</span>
+        <strong>${escapeHtml(String(request.status || "-"))}</strong>
+      </article>
+      <article class="${request.durationMs != null && request.durationMs < 1000 ? "good" : ""}">
+        <span>Duration</span>
+        <strong>${escapeHtml(request.durationMs == null ? "-" : formatMs(request.durationMs))}</strong>
+      </article>
+      <article class="${request.ttftMs != null && request.ttftMs < 1000 ? "good" : ""}">
+        <span>TTFT</span>
+        <strong>${escapeHtml(request.ttftMs == null ? "-" : formatMs(request.ttftMs))}</strong>
+      </article>
+      <article>
+        <span>Response</span>
+        <strong>${escapeHtml(formatBytes(request.responseBytes))}</strong>
+      </article>
+      <article>
+        <span>Tokens</span>
+        <strong>${escapeHtml(String(tokens))}</strong>
+      </article>
+      <article>
+        <span>Gen tok/s</span>
+        <strong>${escapeHtml(rates.generatedTokensPerSecond ?? "-")}</strong>
+      </article>
+    </section>
+  `;
+}
+
+function requestRates(request) {
+  const durationSeconds = request.durationMs ? request.durationMs / 1000 : 0;
+  const tokens = tokenBreakdown(request);
+  const evalSeconds = request.backendMetrics?.eval_duration_ns
+    ? request.backendMetrics.eval_duration_ns / 1_000_000_000
+    : null;
+  const generatedSeconds = evalSeconds || durationSeconds;
+  const visibleSeconds =
+    request.durationMs && request.ttftMs != null
+      ? Math.max((request.durationMs - request.ttftMs) / 1000, 0.001)
+      : durationSeconds;
+  return {
+    generatedTokensPerSecond:
+      tokens.generated == null || !generatedSeconds
+        ? null
+        : formatRate(tokens.generated / generatedSeconds),
+    visibleTokensPerSecond:
+      tokens.visible == null || !visibleSeconds
+        ? null
+        : formatRate(tokens.visible / visibleSeconds),
+    totalTokensPerSecond:
+      tokens.total == null || !durationSeconds
+        ? null
+        : formatRate(tokens.total / durationSeconds),
+    charsPerSecond: durationSeconds
+      ? formatRate(request.responseChars / durationSeconds)
+      : null,
+    bytesPerSecond: durationSeconds
+      ? `${formatRate(request.responseBytes / durationSeconds)} B/s`
+      : null,
+  };
+}
+
+function tokenBreakdown(request) {
+  const usage = request.usage || {};
+  const prompt = usageNumber(usage, [
+    "prompt_tokens",
+    "promptTokens",
+    "input_tokens",
+    "inputTokens",
+  ]);
+  const completion = usageNumber(usage, [
+    "completion_tokens",
+    "completionTokens",
+    "output_tokens",
+    "outputTokens",
+  ]);
+  const total = usageNumber(usage, ["total_tokens", "totalTokens"]);
+  const explicitThinking =
+    usageNumber(usage, ["reasoning_tokens", "reasoningTokens", "thinking_tokens", "thinkingTokens"]) ??
+    usageNumber(usage.completion_tokens_details, [
+      "reasoning_tokens",
+      "reasoningTokens",
+      "thinking_tokens",
+      "thinkingTokens",
+    ]) ??
+    usageNumber(usage.output_tokens_details, [
+      "reasoning_tokens",
+      "reasoningTokens",
+      "thinking_tokens",
+      "thinkingTokens",
+    ]);
+  const inferredThinking =
+    total != null && prompt != null && completion != null
+      ? Math.max(total - prompt - completion, 0)
+      : null;
+  const thinking = explicitThinking ?? inferredThinking ?? 0;
+  const backendGenerated = request.backendMetrics?.eval_count ?? null;
+  const generated =
+    total != null && prompt != null
+      ? Math.max(total - prompt, completion ?? 0)
+      : completion == null
+        ? backendGenerated
+        : completion + thinking;
+  const visible =
+    completion != null && explicitThinking != null && thinking <= completion
+      ? Math.max(completion - thinking, 0)
+      : completion;
+  return { prompt, completion, thinking, generated, visible, total };
+}
+
+function usageNumber(value, names) {
+  if (!value || typeof value !== "object") return null;
+  for (const name of names) {
+    const number = Number(value[name]);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+function requestUsage(usage) {
+  const tokens = tokenBreakdown({ usage });
+  const prompt = tokens.prompt ?? 0;
+  const completion = tokens.completion ?? 0;
+  const thinking = tokens.thinking ?? 0;
+  const total = tokens.total ?? prompt + completion + thinking;
+  const promptPercent = total ? Math.round((prompt / total) * 100) : 0;
+  const completionPercent = total ? Math.round((completion / total) * 100) : 0;
+  const thinkingPercent = total ? Math.round((thinking / total) * 100) : 0;
+  return `
+    <section class="usage-card">
+      <div class="usage-head">
+        <h4>Token Usage</h4>
+        <strong>${escapeHtml(String(total || "-"))}</strong>
+      </div>
+      <div class="usage-bar" title="${prompt} prompt / ${completion} completion / ${thinking} thinking">
+        <span class="prompt" style="width: ${promptPercent}%"></span>
+        <span class="completion" style="width: ${completionPercent}%"></span>
+        <span class="thinking" style="width: ${thinkingPercent}%"></span>
+      </div>
+      <div class="usage-grid">
+        <div>
+          <span>Prompt</span>
+          <strong>${escapeHtml(String(prompt || "-"))}</strong>
+        </div>
+        <div>
+          <span>Completion</span>
+          <strong>${escapeHtml(String(completion || "-"))}</strong>
+        </div>
+        <div>
+          <span>Thinking</span>
+          <strong>${escapeHtml(String(thinking || "-"))}</strong>
+        </div>
+        <div>
+          <span>Total</span>
+          <strong>${escapeHtml(String(total || "-"))}</strong>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function requestThroughput(request) {
+  const rates = requestRates(request);
+  const source = request.backendMetrics?.eval_duration_ns
+    ? "backend eval"
+    : "end-to-end";
+  return requestSection("Throughput", [
+    ["Generated tok/s", rates.generatedTokensPerSecond ?? "-"],
+    ["Visible tok/s", rates.visibleTokensPerSecond ?? "-"],
+    ["Total tok/s", rates.totalTokensPerSecond ?? "-"],
+    ["Chars/s", rates.charsPerSecond ?? "-"],
+    ["Bytes/s", rates.bytesPerSecond ?? "-"],
+    ["Basis", source],
+  ]);
+}
+
+function requestSection(title, rows) {
+  return `
+    <section class="request-section">
+      <h4>${escapeHtml(title)}</h4>
+      ${rows
+        .map(
+          ([label, value]) => `
+            <div class="request-row">
+              <span>${escapeHtml(label)}</span>
+              <strong>${escapeHtml(String(value ?? "-"))}</strong>
+            </div>
+          `,
+        )
+        .join("")}
+    </section>
+  `;
+}
+
+function requestJsonSection(title, value, open = false) {
+  return `
+    <details class="request-details" ${open ? "open" : ""}>
+      <summary>${escapeHtml(title)}</summary>
+      <pre class="request-json">${escapeHtml(pretty(value))}</pre>
+    </details>
+  `;
 }
 
 async function runPrompt(event) {
@@ -727,26 +1197,31 @@ async function runPrompt(event) {
   }
 
   if (selected.source === "openai") {
+    const body = {
+      model: selected.name,
+      messages: [{ role: "user", content: input }],
+      stream: true,
+    };
+    beginRequest(selected, "/v1/chat/completions", "POST", body, input);
     await streamRequest(
       "/v1/chat/completions",
-      {
-        model: selected.name,
-        messages: [{ role: "user", content: input }],
-        stream: true,
-      },
+      body,
       parseOpenAiStream,
     );
   } else {
+    const body = {
+      model: selected.name,
+      messages: [{ role: "user", content: input }],
+      stream: true,
+    };
+    beginRequest(selected, "/api/chat", "POST", body, input);
     await streamRequest(
       "/api/chat",
-      {
-        model: selected.name,
-        messages: [{ role: "user", content: input }],
-        stream: true,
-      },
+      body,
       parseOllamaChatStream,
     );
   }
+  finishRequest("done");
   setStatus("Prompt finished.");
 }
 
@@ -756,35 +1231,75 @@ async function runEmbedding(selected, input) {
     selected.source === "openai"
       ? { model: selected.name, input }
       : { model: selected.name, input };
+  beginRequest(selected, path, "POST", body, input);
   const response = await api("proxy", path, {
     method: "POST",
     body,
     expected: [200, 400, 403, 404, 500],
   });
+  updateRequest({
+    status: response.status,
+    responseBytes: byteLength(JSON.stringify(response.body ?? "")),
+    responseChars: JSON.stringify(response.body ?? "").length,
+    usage: response.body?.usage || null,
+    backendMetrics: embeddingMetrics(response.body),
+  });
+  finishRequest(response.status === 200 ? "done" : "error");
   setPromptOutput(summarizeEmbeddingResponse(response.status, response.body));
 }
 
 async function streamRequest(path, body, parser) {
-  const response = await fetch(`/api/proxy${path}`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify(body),
-  });
-  if (!response.ok || !response.body) {
-    setPromptOutput(`HTTP ${response.status}\n${await response.text()}`);
-    return;
-  }
+  try {
+    const response = await fetch(`/api/proxy${path}`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(body),
+    });
+    updateRequest({
+      status: response.status,
+      responseHeaders: headersObject(response.headers),
+    });
+    if (!response.ok || !response.body) {
+      const text = await response.text();
+      updateRequest({
+        error: text || `HTTP ${response.status}`,
+        responseBytes: byteLength(text),
+        responseChars: text.length,
+      });
+      finishRequest("error");
+      setPromptOutput(`HTTP ${response.status}\n${text}`);
+      return;
+    }
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parsed = parser(buffer);
-    buffer = parsed.rest;
-    if (parsed.text) appendPromptOutput(parsed.text);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parsed = parser(buffer);
+      buffer = parsed.rest;
+      const hasOutput = Boolean(parsed.text);
+      updateRequest({
+        ttftMs:
+          hasOutput && state.lastRequest.ttftMs == null
+            ? Date.now() - state.lastRequest.startedAt.getTime()
+            : state.lastRequest.ttftMs,
+        chunks: state.lastRequest.chunks + 1,
+        responseBytes: state.lastRequest.responseBytes + value.byteLength,
+        responseChars: state.lastRequest.responseChars + (parsed.text || "").length,
+        streamEvents: state.lastRequest.streamEvents + (parsed.events || 0),
+        usage: parsed.usage || state.lastRequest.usage,
+        backendMetrics: parsed.metrics || state.lastRequest.backendMetrics,
+        lastEvent: parsed.lastEvent || state.lastRequest.lastEvent,
+      });
+      if (hasOutput) appendPromptOutput(parsed.text);
+    }
+  } catch (error) {
+    updateRequest({ error: error.message || String(error) });
+    finishRequest("error");
+    setPromptOutput(error.message || String(error));
   }
 }
 
@@ -792,37 +1307,53 @@ function parseOllamaStream(buffer) {
   const lines = buffer.split(/\r?\n/);
   const rest = lines.pop() || "";
   let text = "";
+  let events = 0;
+  let lastEvent = null;
+  let metrics = null;
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
-      text += JSON.parse(line).response || "";
+      const parsed = JSON.parse(line);
+      events += 1;
+      lastEvent = compactEvent(parsed);
+      text += parsed.response || "";
+      if (parsed.done) metrics = ollamaMetrics(parsed);
     } catch {
       text += `${line}\n`;
     }
   }
-  return { text, rest };
+  return { text, rest, events, lastEvent, metrics };
 }
 
 function parseOllamaChatStream(buffer) {
   const lines = buffer.split(/\r?\n/);
   const rest = lines.pop() || "";
   let text = "";
+  let events = 0;
+  let lastEvent = null;
+  let metrics = null;
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line);
+      events += 1;
+      lastEvent = compactEvent(parsed);
       text += parsed.message?.content || parsed.response || "";
+      if (parsed.done) metrics = ollamaMetrics(parsed);
     } catch {
       text += `${line}\n`;
     }
   }
-  return { text, rest };
+  return { text, rest, events, lastEvent, metrics };
 }
 
 function parseOpenAiStream(buffer) {
   const lines = buffer.split(/\r?\n/);
   const rest = lines.pop() || "";
   let text = "";
+  let events = 0;
+  let usage = null;
+  let lastEvent = null;
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed.startsWith("data:")) continue;
@@ -830,12 +1361,38 @@ function parseOpenAiStream(buffer) {
     if (!data || data === "[DONE]") continue;
     try {
       const parsed = JSON.parse(data);
-      text += parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.text || "";
+      events += 1;
+      lastEvent = compactEvent(parsed);
+      if (parsed.usage) usage = parsed.usage;
+      text +=
+        parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.text || "";
     } catch {
       text += `${data}\n`;
     }
   }
-  return { text, rest };
+  return { text, rest, events, usage, lastEvent };
+}
+
+function compactEvent(value) {
+  if (!value || typeof value !== "object") return value;
+  const clone = { ...value };
+  delete clone.context;
+  delete clone.embedding;
+  delete clone.embeddings;
+  delete clone.data;
+  return clone;
+}
+
+function ollamaMetrics(value) {
+  return {
+    done_reason: value.done_reason || null,
+    total_duration_ns: value.total_duration ?? null,
+    load_duration_ns: value.load_duration ?? null,
+    prompt_eval_count: value.prompt_eval_count ?? null,
+    prompt_eval_duration_ns: value.prompt_eval_duration ?? null,
+    eval_count: value.eval_count ?? null,
+    eval_duration_ns: value.eval_duration ?? null,
+  };
 }
 
 function summarizeEmbeddingResponse(status, body) {
@@ -847,10 +1404,26 @@ function summarizeEmbeddingResponse(status, body) {
   const summary = {
     status,
     vectors: vectors.length,
-    dimensions: vectors.map((vector) => vector.length).filter(Boolean).slice(0, 10),
+    dimensions: vectors
+      .map((vector) => vector.length)
+      .filter(Boolean)
+      .slice(0, 10),
     usage: body?.usage || null,
   };
   return pretty(summary);
+}
+
+function embeddingMetrics(body) {
+  const vectors = [];
+  collectEmbeddingVectors(body, vectors);
+  return {
+    vectors: vectors.length,
+    dimensions: vectors
+      .map((vector) => vector.length)
+      .filter(Boolean)
+      .slice(0, 10),
+    usage: body?.usage || null,
+  };
 }
 
 function collectEmbeddingVectors(value, vectors) {
@@ -879,7 +1452,9 @@ async function api(kind, path, options = {}) {
   const body = parseBody(text);
   const expected = options.expected || [200];
   if (!expected.includes(response.status)) {
-    throw new Error(`${method} ${kind}${path} returned ${response.status}: ${text}`);
+    throw new Error(
+      `${method} ${kind}${path} returned ${response.status}: ${text}`,
+    );
   }
   return { status: response.status, body };
 }
@@ -925,7 +1500,9 @@ function extractOpenAiModels(value) {
 }
 
 function defaultModeForModel(model) {
-  const capabilities = Array.isArray(model.capabilities) ? model.capabilities : [];
+  const capabilities = Array.isArray(model.capabilities)
+    ? model.capabilities
+    : [];
   const family = model.details?.family || "";
   const name = model.name || model.model || model.id || "";
   if (
@@ -943,7 +1520,9 @@ function renderApiSurface() {
   $("#api-surface").innerHTML = apiSurface
     .map((group) => ({
       ...group,
-      endpoints: group.endpoints.filter((endpoint) => state.admin || endpoint[2] === "client"),
+      endpoints: group.endpoints.filter(
+        (endpoint) => state.admin || endpoint[2] === "client",
+      ),
     }))
     .filter((group) => group.endpoints.length > 0)
     .map(
@@ -1022,6 +1601,26 @@ function formatBytes(value) {
     unit += 1;
   }
   return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatRate(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  if (number >= 100) return number.toFixed(0);
+  if (number >= 10) return number.toFixed(1);
+  return number.toFixed(2);
+}
+
+function byteLength(value) {
+  return new TextEncoder().encode(String(value ?? "")).length;
+}
+
+function headersObject(headers) {
+  const result = {};
+  headers.forEach((value, key) => {
+    result[key] = value;
+  });
+  return result;
 }
 
 function maskToken(token) {
