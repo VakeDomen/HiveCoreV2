@@ -7,9 +7,14 @@ const state = {
   lastRequest: null,
   keyRoleFilter: "all",
   workerModelFilter: "",
-  usagePreset: "today",
+  usagePreset: "7d",
   usageFrom: "",
   usageTo: "",
+  usageSort: {
+    keys: { field: "time", direction: "desc" },
+    models: { field: "time", direction: "desc" },
+    workers: { field: "time", direction: "desc" },
+  },
   refreshTimer: null,
   refreshIntervalMs: 0,
   data: {
@@ -152,22 +157,29 @@ function bindEvents() {
   });
 
   document.addEventListener("click", async (event) => {
-    const action = event.target?.dataset?.action;
+    const actionTarget = event.target?.closest?.("[data-action]");
+    const action = actionTarget?.dataset?.action;
     if (!action) return;
     if (action === "load-ollama-tags") return loadOllamaTags();
     if (action === "load-openai-models") return loadOpenAiModels();
     if (action === "load-keys") return loadKeys();
     if (action === "load-workers") return loadWorkers();
     if (action === "load-queue") return loadQueue();
+    if (action === "sort-usage") {
+      return sortUsageTable(
+        actionTarget.dataset.table,
+        actionTarget.dataset.field,
+      );
+    }
     if (action === "delete-key")
-      return deleteKey(Number(event.target.dataset.id));
-    if (action === "save-key") return saveKey(Number(event.target.dataset.id));
-    if (action === "copy-token") return copyToken(event.target.dataset.token);
+      return deleteKey(Number(actionTarget.dataset.id));
+    if (action === "save-key") return saveKey(Number(actionTarget.dataset.id));
+    if (action === "copy-token") return copyToken(actionTarget.dataset.token);
     if (action === "select-model") {
       return selectModel(
-        event.target.dataset.source,
-        event.target.dataset.model,
-        event.target.dataset.defaultMode,
+        actionTarget.dataset.source,
+        actionTarget.dataset.model,
+        actionTarget.dataset.defaultMode,
       );
     }
   });
@@ -825,6 +837,9 @@ function renderStats() {
   if (!usage) {
     $("#usage-status").textContent = "No usage loaded.";
     $("#usage-summary").innerHTML = "";
+    $("#usage-traffic-chart").innerHTML = mutedBlock("Load usage stats.");
+    $("#usage-request-chart").innerHTML = mutedBlock("Load usage stats.");
+    $("#usage-worker-chart").innerHTML = mutedBlock("Load usage stats.");
     $("#usage-days").innerHTML = mutedBlock("Load usage stats.");
     $("#usage-backends").innerHTML = mutedBlock("Load usage stats.");
     $("#usage-keys").innerHTML = empty();
@@ -835,6 +850,9 @@ function renderStats() {
   if (usage.error) {
     $("#usage-status").textContent = `Usage unavailable: ${stringifyError(usage.error)}`;
     $("#usage-summary").innerHTML = "";
+    $("#usage-traffic-chart").innerHTML = mutedBlock("No usage available.");
+    $("#usage-request-chart").innerHTML = mutedBlock("No request data available.");
+    $("#usage-worker-chart").innerHTML = mutedBlock("No worker data available.");
     $("#usage-days").innerHTML = mutedBlock("No usage available.");
     $("#usage-backends").innerHTML = mutedBlock("No backend usage available.");
     $("#usage-keys").innerHTML = empty();
@@ -865,8 +883,9 @@ function renderStats() {
     statCard("Queue Time", formatDuration(statValue(summary, "queue_ms")), "summed wait"),
   ].join("");
 
-  renderUsageBars("#usage-days", usage.days || [], "day", "requests");
+  renderUsageBars("#usage-days", usage.days || [], "day", "requests", "day", "desc");
   renderUsageBars("#usage-backends", usage.backends || [], "backend", "requests");
+  renderUsageCharts(usage);
   renderUsageKeys(usage.keys || []);
   renderUsageModels(usage.models || []);
   renderUsageWorkers(usage.workers || []);
@@ -882,10 +901,18 @@ function statCard(label, value, detail, tone = "") {
   `;
 }
 
-function renderUsageBars(selector, rows, labelField, valueField) {
+function renderUsageBars(
+  selector,
+  rows,
+  labelField,
+  valueField,
+  sortField = valueField,
+  sortDirection = "asc",
+) {
   const root = $(selector);
+  const direction = sortDirection === "desc" ? -1 : 1;
   const sorted = [...rows].sort(
-    (a, b) => statValue(b, valueField) - statValue(a, valueField),
+    (a, b) => compareUsageRows(a, b, sortField) * direction,
   );
   if (!sorted.length) {
     root.innerHTML = mutedBlock("No usage in this range.");
@@ -912,30 +939,64 @@ function renderUsageBars(selector, rows, labelField, valueField) {
 }
 
 function renderUsageKeys(rows) {
-  const sorted = sortStats(rows);
+  const sorted = sortUsageRows(rows, "keys");
   $("#usage-keys").innerHTML = sorted.length
-    ? table(
-        ["Client", "Req", "Err", "Input", "Output", "Total", "Time", "Out tok/s"],
-        sorted.map((row) => usageRowCells(row, row.key_name || `key ${row.key_id ?? "-"}`)),
+    ? usageTable(
+        "keys",
+        [
+          { label: "Client", field: "label", type: "text" },
+          { label: "Req", field: "requests" },
+          { label: "Err", field: "errors" },
+          { label: "Input", field: "prompt_tokens" },
+          { label: "Output", field: "completion_tokens" },
+          { label: "Total", field: "total_tokens" },
+          { label: "Time", field: "time" },
+          { label: "Out tok/s", field: "out_tps" },
+        ],
+        sorted.map((row) =>
+          usageRowCells(row, row.key_name || `key ${row.key_id ?? "-"}`),
+        ),
       )
     : empty();
 }
 
 function renderUsageModels(rows) {
-  const sorted = sortStats(rows);
+  const sorted = sortUsageRows(rows, "models");
   $("#usage-models").innerHTML = sorted.length
-    ? table(
-        ["Model", "Req", "Err", "Input", "Output", "Total", "Time", "Out tok/s"],
+    ? usageTable(
+        "models",
+        [
+          { label: "Model", field: "label", type: "text" },
+          { label: "Req", field: "requests" },
+          { label: "Err", field: "errors" },
+          { label: "Input", field: "prompt_tokens" },
+          { label: "Output", field: "completion_tokens" },
+          { label: "Total", field: "total_tokens" },
+          { label: "Time", field: "time" },
+          { label: "Out tok/s", field: "out_tps" },
+        ],
         sorted.map((row) => usageRowCells(row, row.model || "-")),
       )
     : empty();
 }
 
 function renderUsageWorkers(rows) {
-  const sorted = sortStats(rows);
+  const sorted = sortUsageRows(rows, "workers");
   $("#usage-workers").innerHTML = sorted.length
-    ? table(
-        ["Worker", "Backend", "Req", "Err", "Model mix", "Input", "Output", "Total", "Time", "Out tok/s"],
+    ? usageTable(
+        "workers",
+        [
+          { label: "Worker", field: "label", type: "text" },
+          { label: "Backend", field: "backend", type: "text" },
+          { label: "Req", field: "requests" },
+          { label: "Err", field: "errors" },
+          { label: "Model mix", field: "model_mix", type: "text" },
+          { label: "Input", field: "prompt_tokens" },
+          { label: "Output", field: "completion_tokens" },
+          { label: "Total", field: "total_tokens" },
+          { label: "Time", field: "time" },
+          { label: "Out tok/s", field: "out_tps" },
+        ],
         sorted.map((row) => [
           escapeHtml(row.worker_name || "-"),
           escapeHtml(workerBackendLabel(row.backend || "-")),
@@ -952,6 +1013,78 @@ function renderUsageWorkers(rows) {
     : empty();
 }
 
+function renderUsageCharts(usage) {
+  renderTrafficChart(usage.days || []);
+  renderWorkerShareChart(usage.workers || [], "#usage-worker-chart", "time");
+  renderWorkerShareChart(usage.workers || [], "#usage-request-chart", "requests");
+}
+
+function renderTrafficChart(days) {
+  const root = $("#usage-traffic-chart");
+  if (!days.length) {
+    root.innerHTML = mutedBlock("No daily usage in this range.");
+    return;
+  }
+  const ordered = [...days].sort((a, b) => String(a.day).localeCompare(String(b.day)));
+  const maxRequests = Math.max(...ordered.map((row) => statValue(row, "requests")), 1);
+  root.innerHTML = `
+    <div class="mini-bars">
+      ${ordered
+        .map((row) => {
+          const requests = statValue(row, "requests");
+          const errors = statValue(row, "errors");
+          const height = Math.max(4, Math.round((requests / maxRequests) * 100));
+          return `
+            <div class="mini-bar-item" title="${escapeAttr(row.day)} · ${formatCount(requests)} req · ${formatCount(errors)} err">
+              <div class="mini-bar-track">
+                <span class="mini-bar-fill" style="height:${height}%"></span>
+                ${errors ? `<span class="mini-bar-error" style="height:${Math.max(3, Math.round((errors / Math.max(requests, 1)) * height))}%"></span>` : ""}
+              </div>
+              <small>${escapeHtml(shortDate(row.day))}</small>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderWorkerShareChart(workers, selector, metric) {
+  const root = $(selector);
+  const sorted = [...workers]
+    .filter((row) => statMetric(row, metric) > 0)
+    .sort((a, b) => statMetric(b, metric) - statMetric(a, metric))
+    .slice(0, 5);
+  const total = workers.reduce((sum, row) => sum + statMetric(row, metric), 0);
+  if (!sorted.length || !total) {
+    root.innerHTML = mutedBlock("No worker data in this range.");
+    return;
+  }
+  root.innerHTML = `
+    <div class="share-list">
+      ${sorted
+        .map((row) => {
+          const value = statMetric(row, metric);
+          const percent = Math.round((value / total) * 100);
+          const detail = metric === "time"
+            ? formatDuration(statDuration(row))
+            : `${formatCount(statValue(row, "requests"))} req`;
+          return `
+            <div class="share-row">
+              <div>
+                <strong>${escapeHtml(row.worker_name || "-")}</strong>
+                <span>${escapeHtml(workerBackendLabel(row.backend || "-"))} · ${detail}</span>
+              </div>
+              <div class="share-track"><span style="width:${Math.max(2, percent)}%"></span></div>
+              <b>${percent}%</b>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
 function usageRowCells(row, label) {
   return [
     escapeHtml(label),
@@ -965,13 +1098,68 @@ function usageRowCells(row, label) {
   ];
 }
 
-function sortStats(rows) {
+function sortUsageTable(tableName, field) {
+  if (!tableName || !field || !state.usageSort[tableName]) return;
+  const current = state.usageSort[tableName];
+  state.usageSort[tableName] = {
+    field,
+    direction:
+      current.field === field && current.direction === "desc" ? "asc" : "desc",
+  };
+  renderStats();
+}
+
+function sortUsageRows(rows, tableName) {
+  const sort = state.usageSort[tableName] || { field: "time", direction: "desc" };
+  const direction = sort.direction === "asc" ? 1 : -1;
   return [...rows].sort(
-    (a, b) =>
-      statDuration(b) - statDuration(a) ||
-      statValue(b, "requests") - statValue(a, "requests") ||
-      statTotalTokens(b) - statTotalTokens(a),
+    (a, b) => compareUsageRows(a, b, sort.field) * direction,
   );
+}
+
+function compareUsageRows(a, b, field) {
+  if (field === "day") {
+    return String(a.day || a.usage_day || "").localeCompare(
+      String(b.day || b.usage_day || ""),
+    );
+  }
+  if (field === "label") {
+    return usageLabel(a).localeCompare(usageLabel(b));
+  }
+  if (field === "backend") {
+    return String(a.backend || "").localeCompare(String(b.backend || ""));
+  }
+  if (field === "model_mix") {
+    return workerModelMix(a.worker_name).localeCompare(workerModelMix(b.worker_name));
+  }
+  if (field === "time") return statDuration(a) - statDuration(b);
+  if (field === "out_tps") return outputTokensPerSecondNumber(a) - outputTokensPerSecondNumber(b);
+  if (field === "total_tokens") return statTotalTokens(a) - statTotalTokens(b);
+  return statValue(a, field) - statValue(b, field);
+}
+
+function usageLabel(row) {
+  return row.key_name || row.model || row.worker_name || "";
+}
+
+function usageTable(tableName, columns, rows) {
+  const sort = state.usageSort[tableName] || {};
+  return `
+    <table>
+      <thead>
+        <tr>
+          ${columns
+            .map((column) => {
+              const active = sort.field === column.field;
+              const marker = active ? (sort.direction === "asc" ? "▲" : "▼") : "";
+              return `<th><button class="sort-button ${active ? "active" : ""}" data-action="sort-usage" data-table="${tableName}" data-field="${column.field}">${escapeHtml(column.label)} <span>${marker}</span></button></th>`;
+            })
+            .join("")}
+        </tr>
+      </thead>
+      <tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")}</tbody>
+    </table>
+  `;
 }
 
 function workerModelMix(workerName) {
@@ -1009,10 +1197,26 @@ function statDuration(row) {
   return statValue(row, "total_ms") || statValue(row, "duration_ms") || statValue(row, "worker_ms");
 }
 
+function statMetric(row, metric) {
+  if (metric === "time") return statDuration(row);
+  if (metric === "requests") return statValue(row, "requests");
+  return statValue(row, metric);
+}
+
 function outputTokensPerSecond(row) {
+  const value = outputTokensPerSecondNumber(row);
+  return value == null ? "-" : formatRate(value);
+}
+
+function outputTokensPerSecondNumber(row) {
   const seconds = statDuration(row) / 1000;
-  if (!seconds) return "-";
-  return formatRate(statValue(row, "completion_tokens") / seconds);
+  if (!seconds) return null;
+  return statValue(row, "completion_tokens") / seconds;
+}
+
+function shortDate(value) {
+  const text = String(value || "");
+  return text.length >= 10 ? text.slice(5) : text;
 }
 
 async function createKey(event) {
