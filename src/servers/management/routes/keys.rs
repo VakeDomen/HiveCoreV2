@@ -12,8 +12,8 @@ use crate::servers::management::models::key_update_request::KeyUpdateRequest;
 use crate::shared::http::{HttpRequest, HttpResponse};
 use crate::shared::log;
 
-pub fn get_keys(state: &AppState) -> HttpResponse {
-    match render_keys(state) {
+pub fn get_keys(state: &AppState, requester_role: Role) -> HttpResponse {
+    match render_keys(state, requester_role) {
         Ok(body) => json_response(200, "OK", body),
         Err(err) => {
             log::error(format!("failed to render keys: {err}"));
@@ -45,6 +45,19 @@ pub fn post_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
             &payload.name,
             &generated_token,
             "admin",
+        ),
+        Role::Analytics => render_key_create_response(
+            state.keys.insert(
+                generated_token.clone(),
+                Role::Analytics,
+                payload.name.clone(),
+                payload.capture,
+                payload.whitelist_models.clone(),
+                payload.blacklist_models.clone(),
+            ),
+            &payload.name,
+            &generated_token,
+            "analytics",
         ),
         Role::Client => render_key_create_response(
             state.keys.insert(
@@ -139,12 +152,12 @@ pub fn delete_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
     }
 }
 
-fn render_keys(state: &AppState) -> io::Result<Value> {
+fn render_keys(state: &AppState, requester_role: Role) -> io::Result<Value> {
     let entries = state
         .keys
         .list()?
         .into_iter()
-        .map(KeyResponse::from)
+        .map(|record| KeyResponse::from_record(record, requester_role))
         .collect::<Vec<_>>();
     Ok(json!(entries))
 }
@@ -188,7 +201,8 @@ fn json_response(status: u16, reason: &'static str, value: Value) -> HttpRespons
 #[derive(Serialize)]
 struct KeyResponse {
     id: i64,
-    token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
     role: Role,
     name: String,
     whitelist_models: Vec<String>,
@@ -196,16 +210,59 @@ struct KeyResponse {
     capture: bool,
 }
 
-impl From<KeyRecord> for KeyResponse {
-    fn from(value: KeyRecord) -> Self {
+impl KeyResponse {
+    fn from_record(value: KeyRecord, requester_role: Role) -> Self {
         Self {
             id: value.id,
-            token: value.token.clone(),
+            token: (requester_role == Role::Admin).then(|| value.token.clone()),
             role: value.role,
             name: value.name,
             whitelist_models: value.whitelist_models,
             blacklist_models: value.blacklist_models,
             capture: value.capture,
         }
+    }
+}
+
+impl From<KeyRecord> for KeyResponse {
+    fn from(value: KeyRecord) -> Self {
+        Self::from_record(value, Role::Admin)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::KeyResponse;
+    use crate::auth::{KeyRecord, Role};
+
+    fn key_record() -> KeyRecord {
+        KeyRecord {
+            id: 7,
+            token: "secret-token".to_string(),
+            role: Role::Client,
+            name: "alice".to_string(),
+            whitelist_models: vec!["qwen".to_string()],
+            blacklist_models: Vec::new(),
+            capture: true,
+        }
+    }
+
+    #[test]
+    fn admin_key_response_includes_token() {
+        let value = serde_json::to_value(KeyResponse::from_record(key_record(), Role::Admin))
+            .expect("serialize key");
+
+        assert_eq!(value["token"], json!("secret-token"));
+    }
+
+    #[test]
+    fn analytics_key_response_redacts_token() {
+        let value = serde_json::to_value(KeyResponse::from_record(key_record(), Role::Analytics))
+            .expect("serialize key");
+
+        assert!(value.get("token").is_none());
+        assert_eq!(value["name"], json!("alice"));
     }
 }

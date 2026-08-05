@@ -322,6 +322,7 @@ fn fetch_key_by_id(connection: &Connection, id: i64) -> Result<Option<KeyRecord>
 fn parse_role(value: &str) -> Option<Role> {
     match value {
         "Admin" => Some(Role::Admin),
+        "Analytics" => Some(Role::Analytics),
         "Client" => Some(Role::Client),
         "Worker" => Some(Role::Worker),
         _ => None,

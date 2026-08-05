@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use crate::app::{AppState, authorize_admin};
+use crate::app::{AppState, authorize_management};
+use crate::auth::Role;
 use crate::servers::management::routes;
 use crate::shared::http::{HttpResponse, read_request};
 use crate::shared::log;
@@ -39,19 +40,24 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         }
     };
 
-    if !authorize_admin(&state, &request) {
-        log::warn(format!(
-            "rejected unauthorized management request method={} uri={}",
-            request.method, request.uri
-        ));
-        return HttpResponse::new(403, "Unauthorized", Vec::new()).write_to(&mut stream);
-    }
-
     let route_path = request
         .uri
         .split('?')
         .next()
         .unwrap_or(request.uri.as_str());
+    let Some(permission) = management_permission(&request.method, route_path) else {
+        return HttpResponse::new(404, "Not Found", Vec::new()).write_to(&mut stream);
+    };
+
+    let allowed_roles = permission.allowed_roles();
+    let Some(requester_role) = authorize_management(&state, &request, allowed_roles) else {
+        log::warn(format!(
+            "rejected unauthorized management request method={} uri={}",
+            request.method, request.uri
+        ));
+        return HttpResponse::new(403, "Unauthorized", Vec::new()).write_to(&mut stream);
+    };
+
     let response = match (request.method.as_str(), route_path) {
         ("GET", "/queue") => routes::queue::get_queue(&state),
         ("GET", "/usage") => routes::usage::get_usage(&state, &request),
@@ -60,7 +66,7 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         ("GET", "/worker/pings") => routes::workers::get_pings(&state),
         ("GET", "/worker/tags") => routes::workers::get_tags(&state),
         ("GET", "/worker/versions") => routes::workers::get_versions(&state),
-        ("GET", "/key") => routes::keys::get_keys(&state),
+        ("GET", "/key") => routes::keys::get_keys(&state, requester_role),
         ("POST", "/key") => routes::keys::post_key(&state, &request),
         ("PATCH", "/key") => routes::keys::patch_key(&state, &request),
         ("DELETE", "/key") => routes::keys::delete_key(&state, &request),
@@ -80,4 +86,59 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         log::bold(log::format_duration(started_at.elapsed()))
     ));
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ManagementPermission {
+    Read,
+    Write,
+}
+
+impl ManagementPermission {
+    fn allowed_roles(self) -> &'static [Role] {
+        match self {
+            Self::Read => &[Role::Admin, Role::Analytics],
+            Self::Write => &[Role::Admin],
+        }
+    }
+}
+
+fn management_permission(method: &str, route_path: &str) -> Option<ManagementPermission> {
+    match (method, route_path) {
+        ("GET", "/queue")
+        | ("GET", "/usage")
+        | ("GET", "/worker/status")
+        | ("GET", "/worker/connections")
+        | ("GET", "/worker/pings")
+        | ("GET", "/worker/tags")
+        | ("GET", "/worker/versions")
+        | ("GET", "/key") => Some(ManagementPermission::Read),
+        ("POST", "/key") | ("PATCH", "/key") | ("DELETE", "/key") | ("POST", "/worker/command") => {
+            Some(ManagementPermission::Write)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ManagementPermission, management_permission};
+    use crate::auth::Role;
+
+    #[test]
+    fn analytics_can_read_management_routes() {
+        let permission = management_permission("GET", "/usage").expect("usage permission");
+
+        assert!(matches!(permission, ManagementPermission::Read));
+        assert!(permission.allowed_roles().contains(&Role::Analytics));
+    }
+
+    #[test]
+    fn analytics_cannot_write_management_routes() {
+        let permission = management_permission("POST", "/key").expect("key permission");
+
+        assert!(matches!(permission, ManagementPermission::Write));
+        assert!(!permission.allowed_roles().contains(&Role::Analytics));
+        assert!(permission.allowed_roles().contains(&Role::Admin));
+    }
 }

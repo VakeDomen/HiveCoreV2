@@ -3,8 +3,11 @@ const state = {
   key: "",
   role: "disconnected",
   admin: false,
+  managementRead: false,
+  managementWrite: false,
   selectedModel: null,
   lastRequest: null,
+  promptImages: [],
   keyRoleFilter: "all",
   workerModelFilter: "",
   usagePreset: "7d",
@@ -137,6 +140,8 @@ function bindEvents() {
     $("#login-screen").classList.remove("hidden");
     state.role = "disconnected";
     state.admin = false;
+    state.managementRead = false;
+    state.managementWrite = false;
     renderRole();
     setLoginStatus("Enter a key to connect.");
   });
@@ -171,6 +176,8 @@ function bindEvents() {
         actionTarget.dataset.field,
       );
     }
+    if (action === "remove-prompt-image")
+      return removePromptImage(actionTarget.dataset.id);
     if (action === "delete-key")
       return deleteKey(Number(actionTarget.dataset.id));
     if (action === "save-key") return saveKey(Number(actionTarget.dataset.id));
@@ -203,6 +210,11 @@ function bindEvents() {
     await loadUsage();
   });
   $("#prompt-form").addEventListener("submit", runPrompt);
+  $("#prompt-image-button").addEventListener("click", () => {
+    const input = $("#prompt-images");
+    if (!input.disabled) input.click();
+  });
+  $("#prompt-images").addEventListener("change", handlePromptImages);
   $("#model-console-mode").addEventListener("change", () => {
     if (state.selectedModel) {
       state.selectedModel.mode = $("#model-console-mode").value;
@@ -229,24 +241,33 @@ async function connect() {
     expected: [200, 403, 401],
   });
   if (adminProbe.status === 200) {
-    state.admin = true;
-    state.role = "admin";
+    const canSeeTokens = Array.isArray(adminProbe.body)
+      ? adminProbe.body.some((key) => typeof key.token === "string" && key.token.length > 0)
+      : false;
+    state.admin = canSeeTokens;
+    state.managementRead = true;
+    state.managementWrite = canSeeTokens;
+    state.role = canSeeTokens ? "admin" : "analytics";
     state.refreshIntervalMs = Number($("#refresh-interval").value || 5000);
     state.data.keys = adminProbe.body;
-    setStatus("Connected as admin.");
+    setStatus(canSeeTokens ? "Connected as admin." : "Connected as analytics.");
     await Promise.all([loadWorkers(), loadQueue(), loadOllamaTags(), loadOpenAiModels()]);
   } else {
     const modelProbe = await api("proxy", "/api/tags", {
       expected: [200, 401, 403, 404, 500],
     });
     if (modelProbe.status === 401 || modelProbe.status === 403) {
-      state.admin = false;
       state.role = "disconnected";
+      state.admin = false;
+      state.managementRead = false;
+      state.managementWrite = false;
       setLoginStatus("Key was rejected by HiveCore.", true);
       renderRole();
       return;
     }
     state.admin = false;
+    state.managementRead = false;
+    state.managementWrite = false;
     state.role = "client";
     state.refreshIntervalMs = 0;
     $("#refresh-interval").value = "0";
@@ -277,24 +298,41 @@ function resetData() {
   };
   state.selectedModel = null;
   state.lastRequest = null;
+  state.promptImages = [];
 }
 
 function renderRole() {
   const pill = $("#role-pill");
-  pill.className = `pill ${state.role === "admin" ? "admin" : state.role === "client" ? "client" : ""}`;
+  pill.className = `pill ${
+    state.role === "admin"
+      ? "admin"
+      : state.role === "analytics"
+        ? "analytics"
+        : state.role === "client"
+          ? "client"
+          : ""
+  }`;
   pill.textContent =
     state.role === "admin"
       ? "Admin key"
-      : state.role === "client"
-        ? "Client key"
-        : "Disconnected";
+      : state.role === "analytics"
+        ? "Analytics key"
+        : state.role === "client"
+          ? "Client key"
+          : "Disconnected";
   $("#metric-role").textContent = state.role;
-  $(".refresh-control").classList.toggle("hidden", !state.admin);
+  $(".refresh-control").classList.toggle("hidden", !state.managementRead);
   $$(".admin-only").forEach((element) => {
     element.classList.toggle("hidden", !state.admin);
   });
+  $$(".management-read").forEach((element) => {
+    element.classList.toggle("hidden", !state.managementRead);
+  });
+  $$(".admin-write").forEach((element) => {
+    element.classList.toggle("hidden", !state.managementWrite);
+  });
   renderApiSurface();
-  if (!state.admin && ["keys", "workers", "stats"].includes(currentView())) {
+  if (!state.managementRead && ["keys", "workers", "stats"].includes(currentView())) {
     showView("overview");
   }
 }
@@ -304,7 +342,7 @@ function configureAutoRefresh() {
     clearInterval(state.refreshTimer);
     state.refreshTimer = null;
   }
-  if (!state.admin || !state.refreshIntervalMs) return;
+  if (!state.managementRead || !state.refreshIntervalMs) return;
   state.refreshTimer = setInterval(() => {
     refreshCurrentView({ soft: true }).catch((error) => {
       setStatus(error.message, true);
@@ -332,8 +370,8 @@ async function refreshCurrentView(options = {}) {
   if (!options.soft) setStatus("Refreshing...");
   if (view === "overview") {
     await Promise.all([
-      state.admin ? loadWorkers({ quiet: true }) : Promise.resolve(),
-      state.admin ? loadQueue({ quiet: true }) : Promise.resolve(),
+      state.managementRead ? loadWorkers({ quiet: true }) : Promise.resolve(),
+      state.managementRead ? loadQueue({ quiet: true }) : Promise.resolve(),
       loadOllamaTags({ quiet: true }),
       loadOpenAiModels({ quiet: true }),
     ]);
@@ -343,13 +381,13 @@ async function refreshCurrentView(options = {}) {
       loadOllamaTags({ quiet: true }),
       loadOpenAiModels({ quiet: true }),
     ]);
-  if (view === "keys" && state.admin) await loadKeys({ quiet: true });
-  if (view === "workers" && state.admin)
+  if (view === "keys" && state.managementRead) await loadKeys({ quiet: true });
+  if (view === "workers" && state.managementRead)
     await Promise.all([
       loadWorkers({ quiet: true }),
       loadQueue({ quiet: true }),
     ]);
-  if (view === "stats" && state.admin) await loadUsage({ quiet: true });
+  if (view === "stats" && state.managementRead) await loadUsage({ quiet: true });
   renderAll();
   if (!options.soft) setStatus("Refreshed.");
 }
@@ -383,7 +421,7 @@ async function loadQueue() {
 }
 
 async function loadUsage() {
-  if (!state.admin) return;
+  if (!state.managementRead) return;
   ensureUsageRange();
   const query = `?from=${encodeURIComponent(state.usageFrom)}&to=${encodeURIComponent(state.usageTo)}`;
   const response = await api("management", `/usage${query}`, {
@@ -399,7 +437,7 @@ async function loadUsage() {
 
 async function loadOllamaTags() {
   const response = await api("proxy", "/api/tags", {
-    expected: [200, 404, 500],
+    expected: [200, 401, 403, 404, 500],
   });
   state.data.ollamaTags =
     response.status === 200
@@ -410,7 +448,7 @@ async function loadOllamaTags() {
 
 async function loadOpenAiModels() {
   const response = await api("proxy", "/v1/models", {
-    expected: [200, 404, 500],
+    expected: [200, 401, 403, 404, 500],
   });
   state.data.openaiModels =
     response.status === 200
@@ -423,7 +461,7 @@ function renderAll() {
   renderRole();
   renderOverview();
   renderModels();
-  if (state.admin) {
+  if (state.managementRead) {
     renderKeys();
     renderWorkers();
     renderQueue();
@@ -452,18 +490,18 @@ function renderOverview() {
       )
     : 0;
 
-  $("#metric-workers").textContent = state.admin ? workerCount : "-";
+  $("#metric-workers").textContent = state.managementRead ? workerCount : "-";
   $("#metric-models").textContent = modelIds.size || "-";
-  $("#metric-queued").textContent = state.admin ? queued : "-";
+  $("#metric-queued").textContent = state.managementRead ? queued : "-";
   $("#overview-workers")
     .closest(".panel")
-    .classList.toggle("hidden", !state.admin);
+    .classList.toggle("hidden", !state.managementRead);
   $("#overview-queues")
     .closest(".panel")
-    .classList.toggle("hidden", !state.admin);
+    .classList.toggle("hidden", !state.managementRead);
   $("#overview-backends")
     .closest(".panel")
-    .classList.toggle("hidden", !state.admin);
+    .classList.toggle("hidden", !state.managementRead);
   renderOverviewWorkers();
   renderOverviewQueues(queued);
   renderOverviewBackends();
@@ -472,7 +510,7 @@ function renderOverview() {
 
 function renderOverviewWorkers() {
   const root = $("#overview-workers");
-  if (!state.admin) {
+  if (!state.managementRead) {
     root.innerHTML = "";
     return;
   }
@@ -488,7 +526,7 @@ function renderOverviewWorkers() {
 
 function renderOverviewQueues(queued) {
   const root = $("#overview-queues");
-  if (!state.admin) {
+  if (!state.managementRead) {
     root.innerHTML = "";
     return;
   }
@@ -510,7 +548,7 @@ function renderOverviewQueues(queued) {
 
 function renderOverviewBackends() {
   const root = $("#overview-backends");
-  if (!state.admin) {
+  if (!state.managementRead) {
     root.innerHTML = "";
     return;
   }
@@ -617,7 +655,7 @@ function renderModelList(selector, source, models, raw) {
 }
 
 function renderKeys() {
-  if (!state.admin) return;
+  if (!state.managementRead) return;
   const keys = (state.data.keys || []).filter((key) => {
     return state.keyRoleFilter === "all" || key.role === state.keyRoleFilter;
   });
@@ -631,33 +669,39 @@ function renderKeys() {
     $("#keys-table").innerHTML = empty();
     return;
   }
-  $("#keys-table").innerHTML = table(
-    [
-      "ID",
-      "Name",
-      "Token",
-      "Role",
-      "Capture",
-      "Whitelist",
-      "Blacklist",
-      "Actions",
-    ],
-    keys.map((key) => [
-      key.id,
-      `<input data-key-name="${key.id}" value="${escapeAttr(key.name)}" />`,
-      `<button class="token-copy" data-action="copy-token" data-token="${escapeAttr(key.token)}" title="Copy token">${escapeHtml(maskToken(key.token))}</button>`,
-      escapeHtml(key.role),
-      `<label class="check"><input data-key-capture="${key.id}" type="checkbox" ${key.capture ? "checked" : ""} /> capture</label>`,
-      tags(key.whitelist_models),
-      tags(key.blacklist_models),
-      `<button class="small" data-action="save-key" data-id="${key.id}">Save</button>
-       <button class="small" data-action="delete-key" data-id="${key.id}">Delete</button>`,
-    ]),
-  );
+  const headers = state.managementWrite
+    ? ["ID", "Name", "Token", "Role", "Capture", "Whitelist", "Blacklist", "Actions"]
+    : ["ID", "Name", "Role", "Capture", "Whitelist", "Blacklist"];
+  const rows = keys.map((key) => {
+    const common = state.managementWrite
+      ? [
+          key.id,
+          `<input data-key-name="${key.id}" value="${escapeAttr(key.name)}" />`,
+          key.token
+            ? `<button class="token-copy" data-action="copy-token" data-token="${escapeAttr(key.token)}" title="Copy token">${escapeHtml(maskToken(key.token))}</button>`
+            : `<span class="muted">redacted</span>`,
+          escapeHtml(key.role),
+          `<label class="check"><input data-key-capture="${key.id}" type="checkbox" ${key.capture ? "checked" : ""} /> capture</label>`,
+          tags(key.whitelist_models),
+          tags(key.blacklist_models),
+          `<button class="small" data-action="save-key" data-id="${key.id}">Save</button>
+           <button class="small" data-action="delete-key" data-id="${key.id}">Delete</button>`,
+        ]
+      : [
+          key.id,
+          escapeHtml(key.name),
+          escapeHtml(key.role),
+          key.capture ? "yes" : "no",
+          tags(key.whitelist_models),
+          tags(key.blacklist_models),
+        ];
+    return common;
+  });
+  $("#keys-table").innerHTML = table(headers, rows);
 }
 
 function renderWorkers() {
-  if (!state.admin) return;
+  if (!state.managementRead) return;
   const names = workerNames()
     .filter((name) => workerMatchesModelFilter(name, state.workerModelFilter))
     .sort((a, b) => a.localeCompare(b));
@@ -782,7 +826,7 @@ function overviewWorkerCard(name) {
 }
 
 function renderQueue() {
-  if (!state.admin) return;
+  if (!state.managementRead) return;
   $("#queue-json").textContent = pretty(state.data.queue || {});
   renderOverview();
 }
@@ -830,7 +874,7 @@ function syncUsageControls() {
 }
 
 function renderStats() {
-  if (!state.admin) return;
+  if (!state.managementRead) return;
   ensureUsageRange();
   syncUsageControls();
   const usage = state.data.usage;
@@ -1322,6 +1366,7 @@ function selectModel(source, name, defaultMode) {
   $("#model-run-button").disabled = false;
   renderModelConsole();
   renderRequestInfo();
+  renderPromptImages();
   setPromptOutput("Response will appear here.", true);
 }
 
@@ -1333,6 +1378,8 @@ function renderModelConsole() {
       "Choose a model from either list.";
     $("#model-console-mode").disabled = true;
     $("#model-run-button").disabled = true;
+    $("#prompt-images").disabled = true;
+    $("#prompt-image-button").disabled = true;
     renderRequestInfo();
     return;
   }
@@ -1342,10 +1389,12 @@ function renderModelConsole() {
       ? "Ollama native endpoints"
       : "OpenAI-compatible endpoints";
   $("#model-console-mode").value = selected.mode;
+  renderPromptImages();
 }
 
 function beginRequest(selected, path, method, body, input) {
   const bodyText = JSON.stringify(body);
+  const images = state.promptImages || [];
   state.lastRequest = {
     id: Date.now(),
     state: "running",
@@ -1360,8 +1409,10 @@ function beginRequest(selected, path, method, body, input) {
     durationMs: null,
     ttftMs: null,
     promptChars: input.length,
+    imageCount: images.length,
+    imageBytes: images.reduce((sum, image) => sum + Number(image.size || 0), 0),
     requestBytes: byteLength(bodyText),
-    requestBody: body,
+    requestBody: sanitizeRequestBodyForDisplay(body),
     responseBytes: 0,
     responseChars: 0,
     chunks: 0,
@@ -1428,6 +1479,7 @@ function renderRequestInfo() {
       ])}
       ${requestSection("Payload", [
         ["Prompt", `${request.promptChars.toLocaleString()} chars`],
+        ["Images", request.imageCount ? `${request.imageCount} (${formatBytes(request.imageBytes)})` : "0"],
         ["Request", formatBytes(request.requestBytes)],
         ["Response", formatBytes(request.responseBytes)],
         ["Output", `${request.responseChars.toLocaleString()} chars`],
@@ -1626,11 +1678,94 @@ function requestJsonSection(title, value, open = false) {
   `;
 }
 
+function sanitizeRequestBodyForDisplay(value) {
+  if (Array.isArray(value)) return value.map(sanitizeRequestBodyForDisplay);
+  if (!value || typeof value !== "object") return value;
+  const result = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "images" && Array.isArray(child)) {
+      result[key] = child.map((image, index) => `[image ${index + 1}, base64 omitted]`);
+    } else if (key === "image_url" && child?.url) {
+      result[key] = { ...child, url: "[image data URL omitted]" };
+    } else {
+      result[key] = sanitizeRequestBodyForDisplay(child);
+    }
+  }
+  return result;
+}
+
+async function handlePromptImages(event) {
+  const files = Array.from(event.target.files || []);
+  try {
+    const images = await Promise.all(files.map(readPromptImage));
+    state.promptImages = [...state.promptImages, ...images];
+    event.target.value = "";
+    renderPromptImages();
+  } catch (error) {
+    setStatus(`Image upload failed: ${error.message || error}`, true);
+  }
+}
+
+function readPromptImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("image read failed"));
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      const base64 = dataUrl.split(",", 2)[1] || "";
+      resolve({
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        name: file.name,
+        type: file.type || "image/*",
+        size: file.size,
+        dataUrl,
+        base64,
+      });
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function removePromptImage(id) {
+  state.promptImages = state.promptImages.filter((image) => image.id !== id);
+  renderPromptImages();
+}
+
+function renderPromptImages() {
+  const root = $("#prompt-image-list");
+  if (!root) return;
+  const disabled = state.selectedModel?.mode === "embedding";
+  const inputDisabled = Boolean(disabled || !state.selectedModel);
+  $("#prompt-images").disabled = inputDisabled;
+  $("#prompt-image-button").disabled = inputDisabled;
+  if (!state.promptImages.length) {
+    root.innerHTML = `<span class="image-empty">${disabled ? "Images are only available in chat mode." : "No images attached."}</span>`;
+    return;
+  }
+  root.innerHTML = state.promptImages
+    .map(
+      (image) => `
+        <article class="image-preview">
+          <img src="${escapeAttr(image.dataUrl)}" alt="${escapeAttr(image.name)}" />
+          <div>
+            <strong>${escapeHtml(image.name || "image")}</strong>
+            <span>${escapeHtml(image.type)} · ${formatBytes(image.size)}</span>
+          </div>
+          <button class="icon-button" type="button" data-action="remove-prompt-image" data-id="${escapeAttr(image.id)}" title="Remove image">x</button>
+        </article>
+      `,
+    )
+    .join("");
+}
+
 async function runPrompt(event) {
   event.preventDefault();
   const selected = state.selectedModel;
   const input = $("#prompt-text").value;
   if (!selected) return setStatus("Select a model first.", true);
+  if (selected.mode === "embedding" && state.promptImages.length) {
+    return setStatus("Images can only be sent in chat mode.", true);
+  }
   setPromptOutput("Running...", true);
   setStatus(`Running ${selected.mode} on ${selected.name}...`);
 
@@ -1643,7 +1778,7 @@ async function runPrompt(event) {
   if (selected.source === "openai") {
     const body = {
       model: selected.name,
-      messages: [{ role: "user", content: input }],
+      messages: [openAiChatMessage(input, state.promptImages)],
       stream: true,
     };
     beginRequest(selected, "/v1/chat/completions", "POST", body, input);
@@ -1655,7 +1790,7 @@ async function runPrompt(event) {
   } else {
     const body = {
       model: selected.name,
-      messages: [{ role: "user", content: input }],
+      messages: [ollamaChatMessage(input, state.promptImages)],
       stream: true,
     };
     beginRequest(selected, "/api/chat", "POST", body, input);
@@ -1667,6 +1802,28 @@ async function runPrompt(event) {
   }
   finishRequest("done");
   setStatus("Prompt finished.");
+}
+
+function openAiChatMessage(text, images) {
+  if (!images.length) return { role: "user", content: text };
+  return {
+    role: "user",
+    content: [
+      { type: "text", text },
+      ...images.map((image) => ({
+        type: "image_url",
+        image_url: { url: image.dataUrl },
+      })),
+    ],
+  };
+}
+
+function ollamaChatMessage(text, images) {
+  const message = { role: "user", content: text };
+  if (images.length) {
+    message.images = images.map((image) => image.base64);
+  }
+  return message;
 }
 
 async function runEmbedding(selected, input) {
@@ -1964,8 +2121,8 @@ function renderApiSurface() {
   $("#api-surface").innerHTML = apiSurface
     .map((group) => ({
       ...group,
-      endpoints: group.endpoints.filter(
-        (endpoint) => state.admin || endpoint[2] === "client",
+      endpoints: group.endpoints.filter((endpoint) =>
+        endpointVisible(group.title, endpoint),
       ),
     }))
     .filter((group) => group.endpoints.length > 0)
@@ -1992,6 +2149,23 @@ function renderApiSurface() {
       `,
     )
     .join("");
+}
+
+function endpointVisible(groupTitle, endpoint) {
+  const [method, path, scope] = endpoint;
+  if (scope === "client") return true;
+  if (state.admin) return true;
+  if (!state.managementRead || groupTitle !== "Management") return false;
+  return method === "GET" && [
+    "/queue",
+    "/worker/status",
+    "/worker/connections",
+    "/worker/pings",
+    "/worker/tags",
+    "/worker/versions",
+    "/usage?from=YYYY-MM-DD&to=YYYY-MM-DD",
+    "/key",
+  ].includes(path);
 }
 
 function table(headers, rows) {

@@ -36,9 +36,13 @@ impl AppState {
     }
 }
 
-pub fn authorize_admin(state: &Arc<AppState>, request: &HttpRequest) -> bool {
+pub fn authorize_management(
+    state: &Arc<AppState>,
+    request: &HttpRequest,
+    allowed_roles: &[Role],
+) -> Option<Role> {
     request
         .bearer_token()
-        .and_then(|token| state.keys.verify(token, &[Role::Admin]))
-        .is_some()
+        .and_then(|token| state.keys.verify(token, allowed_roles))
+        .map(|record| record.role)
 }

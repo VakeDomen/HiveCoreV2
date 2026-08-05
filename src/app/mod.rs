@@ -4,4 +4,4 @@ pub mod state;
 
 pub use models::config::Config;
 pub use state::AppState;
-pub use state::authorize_admin;
+pub use state::authorize_management;

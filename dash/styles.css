@@ -228,7 +228,9 @@ nav {
     color: var(--accent-strong);
 }
 
-.admin-only.hidden {
+.admin-only.hidden,
+.management-read.hidden,
+.admin-write.hidden {
     display: none;
 }
 
@@ -1060,6 +1062,9 @@ main {
 .response-box.empty {
     display: grid;
     place-items: center;
+    align-content: center;
+    justify-items: center;
+    text-align: center;
     color: var(--muted);
     box-shadow: none;
     border-style: dashed;
@@ -1069,6 +1074,97 @@ main {
     display: grid;
     gap: 12px;
     margin-bottom: 12px;
+}
+
+.image-upload {
+    display: grid;
+    gap: 8px;
+}
+
+.image-upload-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.image-upload-button {
+    width: fit-content;
+    min-height: 34px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--accent-strong);
+    padding: 6px 10px;
+    cursor: pointer;
+}
+
+.image-upload-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.visually-hidden-file {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.image-preview-list {
+    display: grid;
+    gap: 8px;
+}
+
+.image-empty {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.image-preview {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: 56px minmax(0, 1fr) 32px;
+    gap: 10px;
+    align-items: center;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #fbfcfe;
+    padding: 7px;
+}
+
+.image-preview img {
+    width: 56px;
+    height: 44px;
+    object-fit: cover;
+    border-radius: 6px;
+    background: #eef2f7;
+}
+
+.image-preview div {
+    min-width: 0;
+    display: grid;
+    gap: 2px;
+}
+
+.image-preview strong,
+.image-preview span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.image-preview strong {
+    font-size: 13px;
+}
+
+.image-preview span {
+    color: var(--muted);
+    font-size: 12px;
 }
 
 .prompt-actions,
