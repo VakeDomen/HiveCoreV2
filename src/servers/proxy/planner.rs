@@ -34,9 +34,11 @@ enum ProxyEndpoint {
     OpenAiChatCompletions,
     OpenAiChatCompletionsBatch,
     OpenAiCompletions,
+    OpenAiResponses,
     OpenAiEmbeddings,
     OpenAiModels,
     OpenAiModel { model: String },
+    OpenAiResponseState,
     VllmCohereEmbed,
     VllmScore,
     VllmRerank,
@@ -76,10 +78,14 @@ pub fn plan_request(
             route_openai_model_request(request)
         }
         ProxyEndpoint::OpenAiCompletions => route_openai_model_request(request),
+        ProxyEndpoint::OpenAiResponses => route_openai_model_request(request),
         ProxyEndpoint::OpenAiEmbeddings => route_openai_model_request(request),
         ProxyEndpoint::OpenAiModels => local_openai_models_response(state, visible_key),
         ProxyEndpoint::OpenAiModel { model } => {
             local_openai_model_response(state, visible_key, &model)
+        }
+        ProxyEndpoint::OpenAiResponseState => {
+            route_to_any_backend(state, WorkerBackendFilter::Vllm)
         }
         ProxyEndpoint::VllmCohereEmbed
         | ProxyEndpoint::VllmScore
@@ -139,6 +145,7 @@ fn classify_endpoint(request: &HttpRequest) -> ProxyEndpoint {
         ("POST", "/v1/chat/completions") => return ProxyEndpoint::OpenAiChatCompletions,
         ("POST", "/v1/chat/completions/batch") => return ProxyEndpoint::OpenAiChatCompletionsBatch,
         ("POST", "/v1/completions") => return ProxyEndpoint::OpenAiCompletions,
+        ("POST", "/v1/responses") => return ProxyEndpoint::OpenAiResponses,
         ("POST", "/v1/embeddings") => return ProxyEndpoint::OpenAiEmbeddings,
         ("GET", "/v1/models") => return ProxyEndpoint::OpenAiModels,
         ("POST", "/v2/embed") => return ProxyEndpoint::VllmCohereEmbed,
@@ -167,6 +174,16 @@ fn classify_endpoint(request: &HttpRequest) -> ProxyEndpoint {
     if method == "GET" {
         if let Some(model) = strip_prefix_segment(uri, "/v1/models/") {
             return ProxyEndpoint::OpenAiModel { model };
+        }
+        if strip_prefix_segment(uri, "/v1/responses/").is_some() {
+            return ProxyEndpoint::OpenAiResponseState;
+        }
+    }
+
+    if method == "POST" && uri.ends_with("/cancel") {
+        let response_path = uri.strip_suffix("/cancel").unwrap_or(uri);
+        if strip_prefix_segment(response_path, "/v1/responses/").is_some() {
+            return ProxyEndpoint::OpenAiResponseState;
         }
     }
 
@@ -773,6 +790,21 @@ mod tests {
             "/v1/chat/completions",
             br#"{"model":"Qwen/Qwen3-8B"}"#,
         );
+        match plan_request(&state, &req, None) {
+            RoutePlan::QueueByModel { model, kind } => {
+                assert_eq!(model, "Qwen/Qwen3-8B");
+                assert_eq!(kind, ModelRouteKind::OpenAiCompatible);
+            }
+            _ => panic!("expected model route"),
+        }
+        cleanup(&db);
+        Ok(())
+    }
+
+    #[test]
+    fn openai_responses_routes_as_openai_compatible_model_work() -> io::Result<()> {
+        let (state, db) = test_state("openai_responses")?;
+        let req = request("POST", "/v1/responses", br#"{"model":"Qwen/Qwen3-8B"}"#);
         match plan_request(&state, &req, None) {
             RoutePlan::QueueByModel { model, kind } => {
                 assert_eq!(model, "Qwen/Qwen3-8B");

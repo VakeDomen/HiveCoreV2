@@ -454,6 +454,31 @@ mod tests {
     }
 
     #[test]
+    fn rejects_openai_responses_request_when_model_not_in_whitelist() -> io::Result<()> {
+        let (state, db_path) = test_state("openai_responses_whitelist_reject", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            false,
+            vec!["llama3".to_string()],
+            Vec::new(),
+        )?;
+        let request = request_with_auth_to(
+            "POST",
+            "/v1/responses",
+            Some(&token),
+            br#"{"model":"mistral","input":"hello"}"#,
+        );
+
+        assert_eq!(authorize_request(&state, &request), Err(403));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_vllm_request_when_model_not_in_whitelist() -> io::Result<()> {
         let (state, db_path) = test_state("vllm_whitelist_reject", true)?;
         let token = Uuid::new_v4().to_string();

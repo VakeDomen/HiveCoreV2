@@ -61,6 +61,7 @@ pub fn request_usage_model_name(request: &HttpRequest) -> Option<String> {
         | ("POST", "/v1/chat/completions")
         | ("POST", "/v1/chat/completions/batch")
         | ("POST", "/v1/completions")
+        | ("POST", "/v1/responses")
         | ("POST", "/v1/embeddings")
         | ("POST", "/v2/embed")
         | ("POST", "/score")
@@ -132,6 +133,7 @@ pub fn request_model_name(request: &HttpRequest) -> Option<String> {
         | ("POST", "/v1/chat/completions")
         | ("POST", "/v1/chat/completions/batch")
         | ("POST", "/v1/completions")
+        | ("POST", "/v1/responses")
         | ("POST", "/v1/embeddings")
         | ("POST", "/v2/embed")
         | ("POST", "/score")
@@ -168,6 +170,13 @@ fn parse_usage_value(text: &str) -> Option<TokenUsage> {
 
     // Try OpenAI format first
     if let Some(usage) = parsed.get("usage") {
+        return parse_openai_usage(usage);
+    }
+
+    if let Some(usage) = parsed
+        .get("response")
+        .and_then(|response| response.get("usage"))
+    {
         return parse_openai_usage(usage);
     }
 
@@ -405,6 +414,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_responses_usage_from_nested_response_event() {
+        assert_eq!(
+            parse_usage_json(
+                r#"{"type":"response.completed","response":{"usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}}"#
+            ),
+            Some(TokenUsage {
+                prompt_tokens: 11,
+                completion_tokens: 7,
+                total_tokens: 18,
+            })
+        );
+    }
+
+    #[test]
     fn parses_ollama_input_only_usage() {
         assert_eq!(
             parse_usage_json(r#"{"prompt_eval_count":13}"#),
@@ -449,6 +472,18 @@ mod tests {
         assert_eq!(request_usage_model_name(&show_request), None);
         assert_eq!(
             request_usage_model_name(&chat_request).as_deref(),
+            Some("llama3")
+        );
+
+        let responses_request = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/v1/responses".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers: Default::default(),
+            body: br#"{"model":"llama3"}"#.to_vec(),
+        };
+        assert_eq!(
+            request_usage_model_name(&responses_request).as_deref(),
             Some("llama3")
         );
     }

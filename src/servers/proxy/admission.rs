@@ -99,6 +99,7 @@ fn request_models(request: &HttpRequest) -> Vec<String> {
         | ("POST", "/v1/chat/completions")
         | ("POST", "/v1/chat/completions/batch")
         | ("POST", "/v1/completions")
+        | ("POST", "/v1/responses")
         | ("POST", "/v1/embeddings")
         | ("POST", "/v2/embed")
         | ("POST", "/score")
