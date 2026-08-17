@@ -143,10 +143,11 @@ pub fn request_model_name(request: &HttpRequest) -> Option<String> {
         | ("POST", "/v2/rerank")
         | ("POST", "/tokenize")
         | ("POST", "/detokenize")
-        | ("POST", "/api/show")
         | ("POST", "/api/pull")
         | ("POST", "/api/push")
         | ("DELETE", "/api/delete") => extract_json_value(&request.body, "model"),
+        ("POST", "/api/show") => extract_json_value(&request.body, "model")
+            .or_else(|| extract_json_value(&request.body, "name")),
         ("POST", "/api/copy") => extract_json_value(&request.body, "source"),
         ("POST", "/api/create") => extract_json_value(&request.body, "from"),
         _ => None,
@@ -450,6 +451,19 @@ mod tests {
         };
 
         assert_eq!(request_model_name(&request).as_deref(), Some("base-model"));
+    }
+
+    #[test]
+    fn resolves_show_model_name_from_name_field() {
+        let request = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/api/show".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers: Default::default(),
+            body: br#"{"name":"llama3"}"#.to_vec(),
+        };
+
+        assert_eq!(request_model_name(&request).as_deref(), Some("llama3"));
     }
 
     #[test]

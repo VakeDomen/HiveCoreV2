@@ -28,13 +28,19 @@ impl RequestQueue {
         let request_id = task.id;
         let method = task.request.method.clone();
         let uri = task.request.uri.clone();
+        let user = task
+            .context
+            .key_name
+            .clone()
+            .unwrap_or_else(|| "Unauthenticated".to_string());
         guard
             .entry(ModelQueueKey { model, kind })
             .or_default()
             .push_back(task);
         log::info(format!(
-            "queued request id={} route=model:{} kind={} method={} uri={}",
+            "queued request id={} user={} route=model:{} kind={} method={} uri={}",
             log::bold(request_id.to_string()),
+            log::bold(&user),
             log::bold(&queued_model),
             log::bold(kind.as_str()),
             method,
@@ -47,12 +53,18 @@ impl RequestQueue {
         let request_id = task.id;
         let method = task.request.method.clone();
         let uri = task.request.uri.clone();
+        let user = task
+            .context
+            .key_name
+            .clone()
+            .unwrap_or_else(|| "Unauthenticated".to_string());
         let node_name = node.clone();
         let mut guard = self.node_queue.lock().map_err(|_| "node queue poisoned")?;
         guard.entry(node).or_default().push_back(task);
         log::info(format!(
-            "queued request id={} route=worker:{} method={} uri={}",
+            "queued request id={} user={} route=worker:{} method={} uri={}",
             log::bold(request_id.to_string()),
+            log::bold(&user),
             log::bold(&node_name),
             method,
             uri

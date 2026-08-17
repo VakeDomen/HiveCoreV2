@@ -21,8 +21,8 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
     };
 
     log::info(format!(
-        "telegram bot enabled for user={}",
-        log::bold(settings.user_id.to_string())
+        "telegram bot enabled for target={}",
+        log::bold(settings.target.label())
     ));
 
     let client = TelegramClient::new(settings.bot_token)?;
@@ -32,7 +32,7 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
 
     loop {
         if let Err(err) =
-            send_daily_report_if_needed(&client, &db, &state, settings.user_id, &mut current_day)
+            send_daily_report_if_needed(&client, &db, &state, settings.target, &mut current_day)
         {
             log::warn(format!("telegram daily report failed: {err}"));
         }
@@ -42,11 +42,11 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
                 for update in updates {
                     offset = update.update_id + 1;
                     if let Some(message) = update.message {
-                        if !is_allowed_message(&message, settings.user_id) {
+                        if !is_allowed_message(&message, settings.target) {
                             continue;
                         }
                         if let Err(err) =
-                            handle_command(&client, &db, &state, settings.user_id, &message)
+                            handle_command(&client, &db, &state, settings.target, &message)
                         {
                             log::warn(format!("telegram command failed: {err}"));
                         }
@@ -63,15 +63,33 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
 
 struct TelegramSettings {
     bot_token: String,
-    user_id: i64,
+    target: TelegramTarget,
 }
 
 impl TelegramSettings {
     fn from_state(state: &AppState) -> Option<Self> {
         Some(Self {
             bot_token: state.config.telegram_bot_token.clone()?,
-            user_id: state.config.telegram_user_id?,
+            target: TelegramTarget {
+                chat_id: state.config.telegram_user_id?,
+                message_thread_id: state.config.telegram_message_thread_id,
+            },
         })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TelegramTarget {
+    chat_id: i64,
+    message_thread_id: Option<i64>,
+}
+
+impl TelegramTarget {
+    fn label(self) -> String {
+        match self.message_thread_id {
+            Some(thread_id) => format!("{}:{}", self.chat_id, thread_id),
+            None => self.chat_id.to_string(),
+        }
     }
 }
 
@@ -113,15 +131,19 @@ impl TelegramClient {
         }
     }
 
-    fn send_message(&self, user_id: i64, text: &str) -> io::Result<()> {
+    fn send_message(&self, target: TelegramTarget, text: &str) -> io::Result<()> {
+        let mut payload = json!({
+            "chat_id": target.chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+        });
+        if let Some(thread_id) = target.message_thread_id {
+            payload["message_thread_id"] = json!(thread_id);
+        }
         let response = self
             .http
             .post(format!("{}/sendMessage", self.base_url))
-            .json(&json!({
-                "chat_id": user_id,
-                "text": text,
-                "parse_mode": "HTML",
-            }))
+            .json(&payload)
             .send()
             .map_err(io::Error::other)?;
         let body = response
@@ -135,15 +157,21 @@ impl TelegramClient {
     }
 }
 
-fn is_allowed_message(message: &TelegramMessage, user_id: i64) -> bool {
-    message.chat.id == user_id && message.from.as_ref().map(|user| user.id) == Some(user_id)
+fn is_allowed_message(message: &TelegramMessage, target: TelegramTarget) -> bool {
+    if message.chat.id != target.chat_id {
+        return false;
+    }
+    if let Some(thread_id) = target.message_thread_id {
+        return message.message_thread_id == Some(thread_id);
+    }
+    message.from.as_ref().map(|user| user.id) == Some(target.chat_id)
 }
 
 fn handle_command(
     client: &TelegramClient,
     db: &UsageTrackingDb,
     state: &Arc<AppState>,
-    user_id: i64,
+    target: TelegramTarget,
     message: &TelegramMessage,
 ) -> io::Result<()> {
     let text = message.text.as_deref().unwrap_or("").trim();
@@ -166,7 +194,7 @@ fn handle_command(
         _ => "Unknown command. Use /help.".to_string(),
     };
 
-    client.send_message(user_id, &response)
+    client.send_message(target, &response)
 }
 
 fn help_text() -> String {
@@ -407,7 +435,7 @@ fn send_daily_report_if_needed(
     client: &TelegramClient,
     db: &UsageTrackingDb,
     state: &AppState,
-    user_id: i64,
+    target: TelegramTarget,
     current_day: &mut NaiveDate,
 ) -> io::Result<()> {
     let now_day = Local::now().date_naive();
@@ -432,7 +460,7 @@ fn send_daily_report_if_needed(
         }
     };
     let report = format_daily_report(&usage_report, &capture_report);
-    client.send_message(user_id, &report)
+    client.send_message(target, &report)
 }
 
 fn format_daily_report(usage_report: &str, capture_report: &CaptureCompressionReport) -> String {
@@ -496,19 +524,20 @@ struct TelegramUpdate {
     message: Option<TelegramMessage>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct TelegramMessage {
     text: Option<String>,
     chat: TelegramChat,
     from: Option<TelegramUser>,
+    message_thread_id: Option<i64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct TelegramChat {
     id: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct TelegramUser {
     id: i64,
 }
@@ -520,7 +549,10 @@ mod tests {
     use crate::shared::capture::CaptureCompressionReport;
     use crate::shared::sqlite::usage_tracking::DailyUsageRow;
 
-    use super::{format_capture_compression_report, format_usage_report};
+    use super::{
+        TelegramChat, TelegramMessage, TelegramTarget, TelegramUser,
+        format_capture_compression_report, format_usage_report, is_allowed_message,
+    };
 
     #[test]
     fn usage_report_formats_totals_and_rows() {
@@ -574,5 +606,47 @@ mod tests {
         assert!(report.contains("  Compressed: 1.0 KB"));
         assert!(report.contains("  Saved: 3.0 KB"));
         assert!(report.contains("  Disk free: 10.0 MB"));
+    }
+
+    #[test]
+    fn topic_target_accepts_only_matching_chat_and_thread() {
+        let target = TelegramTarget {
+            chat_id: -1003996209253,
+            message_thread_id: Some(2),
+        };
+        let matching = TelegramMessage {
+            text: Some("/status".to_string()),
+            chat: TelegramChat { id: -1003996209253 },
+            from: Some(TelegramUser { id: 12345 }),
+            message_thread_id: Some(2),
+        };
+        let wrong_thread = TelegramMessage {
+            message_thread_id: Some(3),
+            ..matching.clone()
+        };
+
+        assert!(is_allowed_message(&matching, target));
+        assert!(!is_allowed_message(&wrong_thread, target));
+    }
+
+    #[test]
+    fn direct_target_keeps_user_id_check() {
+        let target = TelegramTarget {
+            chat_id: 12345,
+            message_thread_id: None,
+        };
+        let matching = TelegramMessage {
+            text: Some("/status".to_string()),
+            chat: TelegramChat { id: 12345 },
+            from: Some(TelegramUser { id: 12345 }),
+            message_thread_id: None,
+        };
+        let wrong_sender = TelegramMessage {
+            from: Some(TelegramUser { id: 999 }),
+            ..matching.clone()
+        };
+
+        assert!(is_allowed_message(&matching, target));
+        assert!(!is_allowed_message(&wrong_sender, target));
     }
 }

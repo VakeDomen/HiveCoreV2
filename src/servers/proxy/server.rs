@@ -409,6 +409,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_show_request_name_when_model_not_in_whitelist() -> io::Result<()> {
+        let (state, db_path) = test_state("show_name_whitelist_reject", true)?;
+        let token = Uuid::new_v4().to_string();
+        state.keys.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            false,
+            vec!["llama3".to_string()],
+            Vec::new(),
+        )?;
+        let request =
+            request_with_auth_to("POST", "/api/show", Some(&token), br#"{"name":"mistral"}"#);
+
+        assert_eq!(authorize_request(&state, &request), Err(403));
+
+        cleanup(&db_path);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_request_when_model_is_blacklisted() -> io::Result<()> {
         let (state, db_path) = test_state("blacklist_reject", true)?;
         let token = Uuid::new_v4().to_string();

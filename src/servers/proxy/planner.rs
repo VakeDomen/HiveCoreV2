@@ -352,13 +352,19 @@ fn route_show_request(
     request: &HttpRequest,
     visible_key: Option<&KeyRecord>,
 ) -> RoutePlan {
-    let Some(model) = json_string_field(&request.body, "model") else {
+    let Some(model) = json_string_field(&request.body, "model")
+        .or_else(|| json_string_field(&request.body, "name"))
+    else {
         return missing_field("model");
     };
     if !model_visible(visible_key, &model) {
         return not_found_for_masked_model();
     }
-    route_to_owner(state, &model, WorkerBackendFilter::Ollama)
+    let owners = model_owners(state, &model, WorkerBackendFilter::Ollama);
+    if !owners.is_empty() {
+        return RoutePlan::QueueByNode(owners[0].clone());
+    }
+    route_to_any_backend(state, WorkerBackendFilter::Ollama)
 }
 
 fn route_create_request(
@@ -797,6 +803,52 @@ mod tests {
             }
             _ => panic!("expected model route"),
         }
+        cleanup(&db);
+        Ok(())
+    }
+
+    #[test]
+    fn show_routes_to_ollama_owner_by_model_or_name() -> io::Result<()> {
+        let (mut state, db) = test_state("show_owner")?;
+        let mut workers = HashMap::new();
+        workers.insert(
+            "worker-a".to_string(),
+            worker_status("worker-a", vec!["llama3"]),
+        );
+        state.workers = RwLock::new(workers);
+
+        let model_req = request("POST", "/api/show", br#"{"model":"llama3"}"#);
+        match plan_request(&state, &model_req, None) {
+            RoutePlan::QueueByNode(worker) => assert_eq!(worker, "worker-a"),
+            _ => panic!("expected owner route"),
+        }
+
+        let name_req = request("POST", "/api/show", br#"{"name":"llama3"}"#);
+        match plan_request(&state, &name_req, None) {
+            RoutePlan::QueueByNode(worker) => assert_eq!(worker, "worker-a"),
+            _ => panic!("expected owner route"),
+        }
+
+        cleanup(&db);
+        Ok(())
+    }
+
+    #[test]
+    fn show_falls_back_to_ollama_worker_when_catalog_misses_model() -> io::Result<()> {
+        let (mut state, db) = test_state("show_fallback")?;
+        let mut workers = HashMap::new();
+        workers.insert(
+            "worker-a".to_string(),
+            worker_status("worker-a", vec!["llama3"]),
+        );
+        state.workers = RwLock::new(workers);
+
+        let req = request("POST", "/api/show", br#"{"model":"llama3:latest"}"#);
+        match plan_request(&state, &req, None) {
+            RoutePlan::QueueByNode(worker) => assert_eq!(worker, "worker-a"),
+            _ => panic!("expected fallback route"),
+        }
+
         cleanup(&db);
         Ok(())
     }

@@ -109,11 +109,17 @@ fn request_models(request: &HttpRequest) -> Vec<String> {
         | ("POST", "/v2/rerank")
         | ("POST", "/tokenize")
         | ("POST", "/detokenize")
-        | ("POST", "/api/show")
         | ("POST", "/api/pull")
         | ("POST", "/api/push")
         | ("DELETE", "/api/delete") => {
             if let Some(model) = extract_json_value(&request.body, "model") {
+                models.push(model);
+            }
+        }
+        ("POST", "/api/show") => {
+            if let Some(model) = extract_json_value(&request.body, "model")
+                .or_else(|| extract_json_value(&request.body, "name"))
+            {
                 models.push(model);
             }
         }

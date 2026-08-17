@@ -85,7 +85,12 @@ impl Config {
                     config.telegram_bot_token = normalize_optional_string(value);
                 }
                 ("Telegram", "USER_ID") => {
-                    config.telegram_user_id = value.parse::<i64>().ok();
+                    let target = parse_telegram_target(value);
+                    config.telegram_user_id = target.map(|target| target.0);
+                    config.telegram_message_thread_id = target.and_then(|target| target.1);
+                }
+                ("Telegram", "MESSAGE_THREAD_ID") => {
+                    config.telegram_message_thread_id = value.parse::<i64>().ok();
                 }
                 _ => {}
             }
@@ -108,9 +113,7 @@ impl Config {
             self.database_url,
             self.capture_dir,
             self.telegram_bot_token.as_deref().unwrap_or(""),
-            self.telegram_user_id
-                .map(|value| value.to_string())
-                .unwrap_or_default()
+            format_telegram_target(self.telegram_user_id, self.telegram_message_thread_id)
         )
     }
 }
@@ -126,4 +129,54 @@ fn normalize_database_url(value: &str) -> String {
 fn normalize_optional_string(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn parse_telegram_target(value: &str) -> Option<(i64, Option<i64>)> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let Some((chat_id, thread_id)) = trimmed.rsplit_once(':') else {
+        return trimmed.parse::<i64>().ok().map(|chat_id| (chat_id, None));
+    };
+    Some((
+        chat_id.trim().parse::<i64>().ok()?,
+        Some(thread_id.trim().parse::<i64>().ok()?),
+    ))
+}
+
+fn format_telegram_target(chat_id: Option<i64>, message_thread_id: Option<i64>) -> String {
+    match (chat_id, message_thread_id) {
+        (Some(chat_id), Some(thread_id)) => format!("{chat_id}:{thread_id}"),
+        (Some(chat_id), None) => chat_id.to_string(),
+        (None, _) => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, parse_telegram_target};
+
+    #[test]
+    fn parses_plain_telegram_chat_id() {
+        assert_eq!(parse_telegram_target("12345"), Some((12345, None)));
+    }
+
+    #[test]
+    fn parses_telegram_topic_target() {
+        assert_eq!(
+            parse_telegram_target("-1003996209253:2"),
+            Some((-1003996209253, Some(2)))
+        );
+    }
+
+    #[test]
+    fn config_loads_telegram_topic_from_user_id() {
+        let config =
+            Config::from_ini("[Telegram]\nBOT_TOKEN = token\nUSER_ID = -1003996209253:2\n");
+
+        assert_eq!(config.telegram_bot_token.as_deref(), Some("token"));
+        assert_eq!(config.telegram_user_id, Some(-1003996209253));
+        assert_eq!(config.telegram_message_thread_id, Some(2));
+    }
 }

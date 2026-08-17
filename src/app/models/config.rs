@@ -12,6 +12,7 @@ pub struct Config {
     pub capture_dir: String,
     pub telegram_bot_token: Option<String>,
     pub telegram_user_id: Option<i64>,
+    pub telegram_message_thread_id: Option<i64>,
 }
 
 impl Default for Config {
@@ -29,6 +30,7 @@ impl Default for Config {
             capture_dir: "data/captures".to_string(),
             telegram_bot_token: None,
             telegram_user_id: None,
+            telegram_message_thread_id: None,
         }
     }
 }
