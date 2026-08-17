@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use crate::servers::proxy::models::client_task::ClientTask;
 use crate::servers::proxy::models::model_route_kind::ModelRouteKind;
@@ -156,6 +157,64 @@ impl RequestQueue {
             node_queue,
         }
     }
+
+    pub fn expire_older_than(&self, max_age: Duration) -> Vec<ClientTask> {
+        let mut expired = Vec::new();
+
+        if let Ok(mut guard) = self.model_queue.lock() {
+            guard.retain(|key, queue| {
+                let mut kept = VecDeque::new();
+                while let Some(task) = queue.pop_front() {
+                    if task.queue_wait() > max_age {
+                        log_expired_task(
+                            &task,
+                            &format!("model:{} kind={}", key.model, key.kind.as_str()),
+                        );
+                        expired.push(task);
+                    } else {
+                        kept.push_back(task);
+                    }
+                }
+                *queue = kept;
+                !queue.is_empty()
+            });
+        }
+
+        if let Ok(mut guard) = self.node_queue.lock() {
+            guard.retain(|worker, queue| {
+                let mut kept = VecDeque::new();
+                while let Some(task) = queue.pop_front() {
+                    if task.queue_wait() > max_age {
+                        log_expired_task(&task, &format!("worker:{worker}"));
+                        expired.push(task);
+                    } else {
+                        kept.push_back(task);
+                    }
+                }
+                *queue = kept;
+                !queue.is_empty()
+            });
+        }
+
+        expired
+    }
+}
+
+fn log_expired_task(task: &ClientTask, route: &str) {
+    let user = task
+        .context
+        .key_name
+        .as_deref()
+        .unwrap_or("Unauthenticated");
+    log::warn(format!(
+        "expired queued request id={} user={} route={} method={} uri={} wait={}",
+        log::bold(task.id.to_string()),
+        log::bold(user),
+        route,
+        task.request.method,
+        task.request.uri,
+        log::bold(log::format_duration(task.queue_wait()))
+    ));
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -203,6 +262,7 @@ mod tests {
     use crate::servers::proxy::models::response_target::ResponseTarget;
     use crate::servers::worker::models::worker_backend::WorkerBackend;
     use crate::shared::http::HttpRequest;
+    use std::time::Duration;
 
     fn task(uri: &str) -> ClientTask {
         ClientTask::new(
@@ -295,6 +355,44 @@ mod tests {
         assert!(
             queue
                 .dequeue_for_worker("vllm", WorkerBackend::Vllm, &["reranker".to_string()])
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn expire_older_than_removes_stale_model_tasks() {
+        let queue = RequestQueue::default();
+        queue
+            .enqueue_model(
+                "llama3".to_string(),
+                ModelRouteKind::OpenAiCompatible,
+                task("/v1/chat/completions"),
+            )
+            .expect("enqueue");
+
+        let expired = queue.expire_older_than(Duration::from_millis(0));
+
+        assert_eq!(expired.len(), 1);
+        assert!(queue.snapshot().model_queue.is_empty());
+    }
+
+    #[test]
+    fn expire_older_than_keeps_fresh_model_tasks() {
+        let queue = RequestQueue::default();
+        queue
+            .enqueue_model(
+                "llama3".to_string(),
+                ModelRouteKind::OpenAiCompatible,
+                task("/v1/chat/completions"),
+            )
+            .expect("enqueue");
+
+        let expired = queue.expire_older_than(Duration::from_secs(60));
+
+        assert!(expired.is_empty());
+        assert!(
+            queue
+                .dequeue_for_worker("vllm", WorkerBackend::Vllm, &["llama3".to_string()])
                 .is_some()
         );
     }

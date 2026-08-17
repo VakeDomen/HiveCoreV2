@@ -2,7 +2,7 @@ use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::app::{AppState, authorize_management};
 use crate::auth::Role;
@@ -31,6 +31,8 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
 }
 
 fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_millis(state.config.proxy_timeout_ms)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(state.config.proxy_timeout_ms)))?;
     let started_at = Instant::now();
     let request = match read_request(&stream) {
         Ok(request) => request,

@@ -4,7 +4,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::app::AppState;
+use crate::servers::proxy::models::response_target::ResponseTarget;
 use crate::servers::worker::models::worker_phase::WorkerPhase;
+use crate::shared::http::HttpResponse;
 use crate::shared::log;
 
 pub fn run(state: Arc<AppState>) -> io::Result<()> {
@@ -13,6 +15,7 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
         let now = Instant::now();
         let polling_timeout = Duration::from_secs(state.config.polling_node_connection_timeout);
         let working_timeout = Duration::from_secs(state.config.working_node_connection_timeout);
+        expire_queued_requests(&state);
 
         let stale_connections = state
             .workers
@@ -58,6 +61,23 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
                     ));
                 }
             }
+        }
+    }
+}
+
+fn expire_queued_requests(state: &AppState) {
+    let max_age = Duration::from_millis(state.config.proxy_timeout_ms);
+    for task in state.request_queue.expire_older_than(max_age) {
+        match task.response_target {
+            ResponseTarget::ProxyClient(mut stream) => {
+                let _ = HttpResponse::new(
+                    504,
+                    "Gateway Timeout",
+                    b"request expired while waiting for a compatible worker".to_vec(),
+                )
+                .write_to(&mut stream);
+            }
+            ResponseTarget::Capture(_) | ResponseTarget::Ignore => {}
         }
     }
 }
