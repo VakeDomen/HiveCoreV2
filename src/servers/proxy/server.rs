@@ -126,6 +126,7 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
                     capture: visible_key.as_ref().map(|key| key.capture).unwrap_or(false),
                     client_request: Some(client_request),
                     proxy_mutations,
+                    ..RequestContext::default()
                 },
             )?;
             enqueue_model(
@@ -163,6 +164,7 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
                     capture: visible_key.as_ref().map(|key| key.capture).unwrap_or(false),
                     client_request: Some(client_request),
                     proxy_mutations,
+                    ..RequestContext::default()
                 },
             )?;
             enqueue_node(

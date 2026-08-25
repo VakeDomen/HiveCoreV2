@@ -8,10 +8,20 @@ use crate::servers::proxy::models::queue_snapshot::QueueSnapshot;
 use crate::servers::worker::models::worker_backend::WorkerBackend;
 use crate::shared::log;
 
-#[derive(Default)]
 pub struct RequestQueue {
     model_queue: Mutex<HashMap<ModelQueueKey, VecDeque<ClientTask>>>,
     node_queue: Mutex<HashMap<String, VecDeque<ClientTask>>>,
+    default_timeout: Duration,
+}
+
+impl Default for RequestQueue {
+    fn default() -> Self {
+        Self {
+            model_queue: Mutex::new(HashMap::new()),
+            node_queue: Mutex::new(HashMap::new()),
+            default_timeout: Duration::from_secs(60),
+        }
+    }
 }
 
 impl RequestQueue {
@@ -80,8 +90,19 @@ impl RequestQueue {
         tags: &[String],
     ) -> Option<ClientTask> {
         if let Ok(mut node_guard) = self.node_queue.lock() {
+            let mut remove_node_queue = false;
+            let mut selected_task = None;
             if let Some(queue) = node_guard.get_mut(worker_name) {
+                expire_queue_tasks(
+                    queue,
+                    self.default_timeout,
+                    &mut Vec::new(),
+                    &format!("worker:{worker_name}"),
+                    true,
+                );
+                remove_node_queue = queue.is_empty();
                 if let Some(task) = queue.pop_front() {
+                    remove_node_queue = queue.is_empty();
                     let wait = log::format_duration(task.queue_wait());
                     log::info(format!(
                         "dispatch request id={} worker={} route=targeted wait={}",
@@ -89,8 +110,14 @@ impl RequestQueue {
                         log::bold(worker_name),
                         log::bold(wait)
                     ));
-                    return Some(task);
+                    selected_task = Some(task);
                 }
+            }
+            if remove_node_queue {
+                node_guard.remove(worker_name);
+            }
+            if selected_task.is_some() {
+                return selected_task;
             }
         }
 
@@ -102,7 +129,17 @@ impl RequestQueue {
                 continue;
             };
             if let Some(queue) = model_guard.get_mut(&key) {
+                let mut selected_task = None;
+                expire_queue_tasks(
+                    queue,
+                    self.default_timeout,
+                    &mut Vec::new(),
+                    &format!("model:{} kind={}", key.model, key.kind.as_str()),
+                    true,
+                );
+                let mut remove_model_queue = queue.is_empty();
                 if let Some(task) = queue.pop_front() {
+                    remove_model_queue = queue.is_empty();
                     let wait = log::format_duration(task.queue_wait());
                     log::info(format!(
                         "dispatch request id={} worker={} backend={} route=model:{} kind={} wait={}",
@@ -113,7 +150,13 @@ impl RequestQueue {
                         log::bold(key.kind.as_str()),
                         log::bold(wait)
                     ));
-                    return Some(task);
+                    selected_task = Some(task);
+                }
+                if remove_model_queue {
+                    model_guard.remove(&key);
+                }
+                if selected_task.is_some() {
+                    return selected_task;
                 }
             }
         }
@@ -163,41 +206,55 @@ impl RequestQueue {
 
         if let Ok(mut guard) = self.model_queue.lock() {
             guard.retain(|key, queue| {
-                let mut kept = VecDeque::new();
-                while let Some(task) = queue.pop_front() {
-                    if task.queue_wait() > max_age {
-                        log_expired_task(
-                            &task,
-                            &format!("model:{} kind={}", key.model, key.kind.as_str()),
-                        );
-                        expired.push(task);
-                    } else {
-                        kept.push_back(task);
-                    }
-                }
-                *queue = kept;
+                expire_queue_tasks(
+                    queue,
+                    max_age,
+                    &mut expired,
+                    &format!("model:{} kind={}", key.model, key.kind.as_str()),
+                    false,
+                );
                 !queue.is_empty()
             });
         }
 
         if let Ok(mut guard) = self.node_queue.lock() {
             guard.retain(|worker, queue| {
-                let mut kept = VecDeque::new();
-                while let Some(task) = queue.pop_front() {
-                    if task.queue_wait() > max_age {
-                        log_expired_task(&task, &format!("worker:{worker}"));
-                        expired.push(task);
-                    } else {
-                        kept.push_back(task);
-                    }
-                }
-                *queue = kept;
+                expire_queue_tasks(
+                    queue,
+                    max_age,
+                    &mut expired,
+                    &format!("worker:{worker}"),
+                    false,
+                );
                 !queue.is_empty()
             });
         }
 
         expired
     }
+}
+
+fn expire_queue_tasks(
+    queue: &mut VecDeque<ClientTask>,
+    default_timeout: Duration,
+    expired: &mut Vec<ClientTask>,
+    route: &str,
+    custom_timeout_only: bool,
+) {
+    let mut kept = VecDeque::new();
+    while let Some(task) = queue.pop_front() {
+        if custom_timeout_only && task.context.queue_timeout.is_none() {
+            kept.push_back(task);
+            continue;
+        }
+        if task.is_expired(default_timeout) {
+            log_expired_task(&task, route);
+            expired.push(task);
+        } else {
+            kept.push_back(task);
+        }
+    }
+    *queue = kept;
 }
 
 fn log_expired_task(task: &ClientTask, route: &str) {
@@ -262,7 +319,7 @@ mod tests {
     use crate::servers::proxy::models::response_target::ResponseTarget;
     use crate::servers::worker::models::worker_backend::WorkerBackend;
     use crate::shared::http::HttpRequest;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn task(uri: &str) -> ClientTask {
         ClientTask::new(
@@ -276,6 +333,13 @@ mod tests {
             ResponseTarget::Ignore,
             RequestContext::default(),
         )
+    }
+
+    fn timed_task(uri: &str, queue_timeout: Duration, age: Duration) -> ClientTask {
+        let mut task = task(uri);
+        task.context.queue_timeout = Some(queue_timeout);
+        task.queued_at = Instant::now() - age;
+        task
     }
 
     #[test]
@@ -395,5 +459,46 @@ mod tests {
                 .dequeue_for_worker("vllm", WorkerBackend::Vllm, &["llama3".to_string()])
                 .is_some()
         );
+    }
+
+    #[test]
+    fn expire_older_than_honors_short_task_timeout() {
+        let queue = RequestQueue::default();
+        queue
+            .enqueue_to_node(
+                "worker-a".to_string(),
+                timed_task("/v1/models", Duration::from_millis(5), Duration::from_millis(10)),
+            )
+            .expect("enqueue");
+
+        let expired = queue.expire_older_than(Duration::from_secs(60));
+
+        assert_eq!(expired.len(), 1);
+        assert!(queue.snapshot().node_queue.is_empty());
+    }
+
+    #[test]
+    fn dispatch_prunes_stale_targeted_probe_before_model_work() {
+        let queue = RequestQueue::default();
+        queue
+            .enqueue_to_node(
+                "vllm".to_string(),
+                timed_task("/v1/models", Duration::from_millis(5), Duration::from_millis(10)),
+            )
+            .expect("enqueue probe");
+        queue
+            .enqueue_model(
+                "reranker".to_string(),
+                ModelRouteKind::VllmSpecific,
+                task("/rerank"),
+            )
+            .expect("enqueue rerank");
+
+        let task = queue
+            .dequeue_for_worker("vllm", WorkerBackend::Vllm, &["reranker".to_string()])
+            .expect("rerank task");
+
+        assert_eq!(task.request.uri, "/rerank");
+        assert!(queue.snapshot().node_queue.is_empty());
     }
 }

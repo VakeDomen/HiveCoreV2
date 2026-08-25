@@ -58,7 +58,10 @@ fn dispatch_capture(
     let task = ClientTask::new(
         request,
         ResponseTarget::Capture(tx),
-        RequestContext::default(),
+        RequestContext {
+            queue_timeout: Some(timeout),
+            ..RequestContext::default()
+        },
     );
     if let Err(err) = state
         .request_queue

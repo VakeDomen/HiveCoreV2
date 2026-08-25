@@ -15,6 +15,7 @@ pub struct RequestContext {
     pub capture: bool,
     pub client_request: Option<HttpRequest>,
     pub proxy_mutations: Vec<String>,
+    pub queue_timeout: Option<Duration>,
 }
 
 pub struct ClientTask {
@@ -42,5 +43,9 @@ impl ClientTask {
 
     pub fn queue_wait(&self) -> Duration {
         self.queued_at.elapsed()
+    }
+
+    pub fn is_expired(&self, default_timeout: Duration) -> bool {
+        self.queue_wait() > self.context.queue_timeout.unwrap_or(default_timeout)
     }
 }
