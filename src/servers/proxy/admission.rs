@@ -74,23 +74,26 @@ pub fn authorize_request(state: &AppState, request: &HttpRequest) -> Result<(), 
             }
         }
 
-        // Rate limit check — reserve a concurrent slot on success
-        let tier = state
-            .rate_limiter
-            .resolve_tier(&key.rate_limit_tier);
-        let result = state.rate_limiter.check(key.id, &tier);
-        if !result.allowed {
-            log::warn(format!(
-                "rate limited key={} method={} uri={} reason={:?} retry_after={:?}",
-                key.name, request.method, request.uri, result.reason, result.retry_after_secs
-            ));
-            return Err(AuthError::RateLimited(RateLimitDenial {
-                reason: result.reason.unwrap_or("rate limit"),
-                retry_after_secs: result.retry_after_secs,
-            }));
+        // Skip rate limiting for lightweight discovery / info routes.
+        if !is_discovery_route(request) {
+            // Rate limit check — reserve a concurrent slot on success
+            let tier = state
+                .rate_limiter
+                .resolve_tier(&key.rate_limit_tier);
+            let result = state.rate_limiter.check(key.id, &tier);
+            if !result.allowed {
+                log::warn(format!(
+                    "rate limited key={} method={} uri={} reason={:?} retry_after={:?}",
+                    key.name, request.method, request.uri, result.reason, result.retry_after_secs
+                ));
+                return Err(AuthError::RateLimited(RateLimitDenial {
+                    reason: result.reason.unwrap_or("rate limit"),
+                    retry_after_secs: result.retry_after_secs,
+                }));
+            }
+            // Concurrent slot reserved at admission time so queued requests also count.
+            state.rate_limiter.start_request(key.id);
         }
-        // Concurrent slot reserved at admission time so queued requests also count.
-        state.rate_limiter.start_request(key.id);
     }
 
     Ok(())
@@ -169,4 +172,19 @@ fn request_models(request: &HttpRequest) -> Vec<String> {
         _ => {}
     }
     models
+}
+
+/// Returns true for lightweight discovery / info routes that should not be rate limited.
+fn is_discovery_route(request: &HttpRequest) -> bool {
+    matches!(
+        (request.method.as_str(), request.uri.as_str()),
+        ("GET", "/api/tags")
+            | ("GET", "/api/ps")
+            | ("GET", "/api/version")
+            | ("GET", "/health")
+            | ("GET", "/v1/models")
+            | ("GET", "/tokenizer_info")
+            | ("GET", "/version")
+            | ("GET", "/is_sleeping")
+    ) || (request.method == "GET" && request.uri.as_str().starts_with("/v1/models/"))
 }
