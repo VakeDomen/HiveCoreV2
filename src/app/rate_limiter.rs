@@ -75,6 +75,8 @@ impl KeyState {
 pub struct CheckResult {
     pub allowed: bool,
     pub retry_after_secs: Option<u64>,
+    /// Human-readable reason for the denial (e.g. "concurrent limit" or "minute limit").
+    pub reason: Option<&'static str>,
 }
 
 pub struct RateLimiter {
@@ -120,17 +122,20 @@ impl RateLimiter {
                 return CheckResult {
                     allowed: true,
                     retry_after_secs: None,
+                    reason: None,
                 };
             }
         };
 
         let key_state = guard.entry(key_id).or_insert_with(KeyState::new);
 
-        // 1. Check concurrent limit
+        // 1. Check concurrent limit (checked but not incremented here — caller must
+        //    call start_request after a successful check to reserve the slot).
         if tier.max_concurrent > 0 && key_state.concurrent >= tier.max_concurrent as i64 {
             return CheckResult {
                 allowed: false,
                 retry_after_secs: Some(1),
+                reason: Some("concurrent limit"),
             };
         }
 
@@ -143,6 +148,7 @@ impl RateLimiter {
             ("month", tier.requests_per_month, WINDOW_MONTH),
         ];
 
+        let mut reason = None;
         let mut min_retry = None;
 
         for (name, limit, window_dur) in &limits {
@@ -159,6 +165,9 @@ impl RateLimiter {
                     } else {
                         1
                     };
+                    if min_retry.is_none() {
+                        reason = Some(*name);
+                    }
                     min_retry = Some(min_retry.map_or(retry, |r: u64| r.min(retry)));
                 }
             }
@@ -168,6 +177,14 @@ impl RateLimiter {
             return CheckResult {
                 allowed: false,
                 retry_after_secs: Some(retry_after),
+                reason: reason.map(|name| match name {
+                    "min" => "minute limit",
+                    "hour" => "hour limit",
+                    "day" => "day limit",
+                    "week" => "week limit",
+                    "month" => "month limit",
+                    _ => "rate limit",
+                }),
             };
         }
 
@@ -189,6 +206,7 @@ impl RateLimiter {
         CheckResult {
             allowed: true,
             retry_after_secs: None,
+            reason: None,
         }
     }
 

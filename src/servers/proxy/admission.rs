@@ -3,7 +3,22 @@ use crate::auth::{KeyRecord, Role};
 use crate::shared::http::{HttpRequest, extract_json_value};
 use crate::shared::log;
 
-pub fn authorize_request(state: &AppState, request: &HttpRequest) -> Result<(), u16> {
+/// Result of an authorization check that failed due to a rate limit.
+#[derive(Debug, PartialEq)]
+pub struct RateLimitDenial {
+    pub reason: &'static str,
+    pub retry_after_secs: Option<u64>,
+}
+
+/// Authorization error — either a status code for auth/model failures,
+/// or a rate limit denial with a descriptive reason.
+#[derive(Debug, PartialEq)]
+pub enum AuthError {
+    Status(u16),
+    RateLimited(RateLimitDenial),
+}
+
+pub fn authorize_request(state: &AppState, request: &HttpRequest) -> Result<(), AuthError> {
     let verified_key = authorized_key(state, request);
 
     if state.config.user_authentication && verified_key.is_none() {
@@ -11,7 +26,7 @@ pub fn authorize_request(state: &AppState, request: &HttpRequest) -> Result<(), 
             "rejected unauthorized client request method={} uri={}",
             request.method, request.uri
         ));
-        return Err(401);
+        return Err(AuthError::Status(401));
     }
 
     if request.header("node").is_some() {
@@ -20,14 +35,14 @@ pub fn authorize_request(state: &AppState, request: &HttpRequest) -> Result<(), 
                 "rejected node-targeted request without admin key method={} uri={}",
                 request.method, request.uri
             ));
-            return Err(401);
+            return Err(AuthError::Status(401));
         };
         if key.role != Role::Admin {
             log::warn(format!(
                 "rejected node-targeted request for non-admin key={} method={} uri={}",
                 key.name, request.method, request.uri
             ));
-            return Err(403);
+            return Err(AuthError::Status(403));
         }
     }
 
@@ -37,14 +52,14 @@ pub fn authorize_request(state: &AppState, request: &HttpRequest) -> Result<(), 
                 "rejected admin-only proxy request without admin key method={} uri={}",
                 request.method, request.uri
             ));
-            return Err(401);
+            return Err(AuthError::Status(401));
         };
         if key.role != Role::Admin {
             log::warn(format!(
                 "rejected admin-only proxy request for non-admin key={} method={} uri={}",
                 key.name, request.method, request.uri
             ));
-            return Err(403);
+            return Err(AuthError::Status(403));
         }
     }
 
@@ -55,22 +70,27 @@ pub fn authorize_request(state: &AppState, request: &HttpRequest) -> Result<(), 
                     "rejected model by key policy key={} model={}",
                     key.name, model
                 ));
-                return Err(403);
+                return Err(AuthError::Status(403));
             }
         }
 
-        // Rate limit check
+        // Rate limit check — reserve a concurrent slot on success
         let tier = state
             .rate_limiter
             .resolve_tier(&key.rate_limit_tier);
         let result = state.rate_limiter.check(key.id, &tier);
         if !result.allowed {
             log::warn(format!(
-                "rate limited key={} method={} uri={} retry_after={:?}",
-                key.name, request.method, request.uri, result.retry_after_secs
+                "rate limited key={} method={} uri={} reason={:?} retry_after={:?}",
+                key.name, request.method, request.uri, result.reason, result.retry_after_secs
             ));
-            return Err(429);
+            return Err(AuthError::RateLimited(RateLimitDenial {
+                reason: result.reason.unwrap_or("rate limit"),
+                retry_after_secs: result.retry_after_secs,
+            }));
         }
+        // Concurrent slot reserved at admission time so queued requests also count.
+        state.rate_limiter.start_request(key.id);
     }
 
     Ok(())

@@ -248,6 +248,7 @@ fn handle_poll(
             WorkerPhase::Working,
             None,
         );
+        let key_id = task.context.key_id;
         let request_id = task.id;
         let request_method = task.request.method.clone();
         let request_uri = task.request.uri.clone();
@@ -269,32 +270,68 @@ fn handle_poll(
             request_uri,
             log::bold(log::format_duration(queue_wait))
         ));
-        // Track concurrent in-flight requests for rate limiting
-        if let Some(key_id) = task.context.key_id {
-            state.rate_limiter.start_request(key_id);
+
+        // Helper to ensure the concurrent slot is released on any exit path.
+        let mut cleanup_key = key_id;
+        macro_rules! finish_or_continue {
+            () => {{
+                if let Some(kid) = cleanup_key.take() {
+                    state.rate_limiter.finish_request(kid);
+                }
+            }};
         }
-        write_framed_request(writer, &bytes)?;
+
+        let write_result = write_framed_request(writer, &bytes);
+        if let Err(e) = write_result {
+            finish_or_continue!();
+            return Err(e);
+        }
 
         let mut response_capture = task.context.capture.then(ResponseCaptureBuilder::default);
         let (status_code, token_usage): (u16, Option<TokenUsage>) = match task.response_target {
-            ResponseTarget::ProxyClient(mut client_stream) => proxy_worker_response_with_capture(
-                reader,
-                &mut client_stream,
-                response_capture.as_mut(),
-            )?,
+            ResponseTarget::ProxyClient(mut client_stream) => {
+                match proxy_worker_response_with_capture(
+                    reader,
+                    &mut client_stream,
+                    response_capture.as_mut(),
+                ) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        finish_or_continue!();
+                        return Err(e);
+                    }
+                }
+            }
             ResponseTarget::Capture(sender) => {
-                let response = capture_worker_response(reader)?;
+                let response = match capture_worker_response(reader) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        finish_or_continue!();
+                        return Err(e);
+                    }
+                };
                 let status_code = response.status_code;
                 let _ = sender.send(response);
                 (status_code, None)
             }
-            ResponseTarget::Ignore => discard_worker_response(reader).map(|sc| (sc, None))?,
+            ResponseTarget::Ignore => {
+                match discard_worker_response(reader).map(|sc| (sc, None)) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        finish_or_continue!();
+                        return Err(e);
+                    }
+                }
+            }
         };
+
+        // All fallible work done — release the concurrent slot.
+        finish_or_continue!();
 
         let worker_time = started_at.elapsed();
         if let Some(builder) = response_capture {
             if let (Some(key_id), Some(client_request)) =
-                (task.context.key_id, task.context.client_request.as_ref())
+                (key_id, task.context.client_request.as_ref())
             {
                 let key_name = task
                     .context
@@ -386,11 +423,6 @@ fn handle_poll(
                 created_at,
             };
             let _ = state.stats_tx.send(usage_event);
-        }
-
-        // Request is done — decrement concurrent counter
-        if let Some(key_id) = task.context.key_id {
-            state.rate_limiter.finish_request(key_id);
         }
 
         touch_worker(

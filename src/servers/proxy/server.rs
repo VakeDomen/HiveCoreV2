@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::app::AppState;
-use crate::servers::proxy::admission::authorize_request;
+use crate::servers::proxy::admission::{AuthError, authorize_request};
 use crate::servers::proxy::admission::authorized_key;
 use crate::servers::proxy::models::client_task::{ClientTask, RequestContext};
 use crate::servers::proxy::models::model_route_kind::ModelRouteKind;
@@ -49,14 +49,24 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         }
     };
 
-    if let Err(status) = authorize_request(&state, &request) {
-        let (reason, body): (&str, Vec<u8>) = match status {
-            403 => ("Forbidden", Vec::new()),
-            429 => (
-                "Too Many Requests",
-                br#"{"error":"rate_limit_exceeded","message":"too many requests"}"#.to_vec(),
-            ),
-            _ => ("Unauthorized", Vec::new()),
+    if let Err(err) = authorize_request(&state, &request) {
+        let (status, reason, body): (u16, &str, Vec<u8>) = match err {
+            AuthError::RateLimited(denial) => {
+                let body = if let Some(retry) = denial.retry_after_secs {
+                    format!(
+                        r#"{{"error":"rate_limit_exceeded","message":"{}","retry_after_secs":{}}}"#,
+                        denial.reason, retry
+                    ).into_bytes()
+                } else {
+                    format!(
+                        r#"{{"error":"rate_limit_exceeded","message":"{}"}}"#,
+                        denial.reason
+                    ).into_bytes()
+                };
+                (429, "Too Many Requests", body)
+            }
+            AuthError::Status(403) => (403, "Forbidden", Vec::new()),
+            AuthError::Status(_) => (401, "Unauthorized", Vec::new()),
         };
         log::warn(format!(
             "rejected client request method={} uri={} status={} total={}",
@@ -247,7 +257,7 @@ mod tests {
 
     use crate::app::{AppState, Config};
     use crate::auth::Role;
-    use crate::servers::proxy::admission::authorize_request;
+    use crate::servers::proxy::admission::{AuthError, authorize_request};
     use crate::shared::http::HttpRequest;
 
     fn temp_db_path(test_name: &str) -> PathBuf {
@@ -310,7 +320,7 @@ mod tests {
         let (state, db_path) = test_state("missing_auth", true)?;
         let request = request_with_auth(None, br#"{"model":"llama3"}"#);
 
-        assert_eq!(authorize_request(&state, &request), Err(401));
+        assert_eq!(authorize_request(&state, &request), Err(AuthError::Status(401)));
 
         cleanup(&db_path);
         Ok(())
@@ -321,7 +331,7 @@ mod tests {
         let (state, db_path) = test_state("local_missing_auth", true)?;
         let request = request_with_auth_to("GET", "/api/tags", None, b"");
 
-        assert_eq!(authorize_request(&state, &request), Err(401));
+        assert_eq!(authorize_request(&state, &request), Err(AuthError::Status(401)));
 
         cleanup(&db_path);
         Ok(())
@@ -414,7 +424,7 @@ mod tests {
         )?;
         let request = request_with_auth(Some(&token), br#"{"model":"mistral"}"#);
 
-        assert_eq!(authorize_request(&state, &request), Err(403));
+        assert_eq!(authorize_request(&state, &request), Err(AuthError::Status(403)));
 
         cleanup(&db_path);
         Ok(())
@@ -436,7 +446,7 @@ mod tests {
         let request =
             request_with_auth_to("POST", "/api/show", Some(&token), br#"{"name":"mistral"}"#);
 
-        assert_eq!(authorize_request(&state, &request), Err(403));
+        assert_eq!(authorize_request(&state, &request), Err(AuthError::Status(403)));
 
         cleanup(&db_path);
         Ok(())
@@ -457,7 +467,7 @@ mod tests {
         )?;
         let request = request_with_auth(Some(&token), br#"{"model":"mistral"}"#);
 
-        assert_eq!(authorize_request(&state, &request), Err(403));
+        assert_eq!(authorize_request(&state, &request), Err(AuthError::Status(403)));
 
         cleanup(&db_path);
         Ok(())
@@ -483,7 +493,7 @@ mod tests {
             br#"{"model":"mistral","messages":[]}"#,
         );
 
-        assert_eq!(authorize_request(&state, &request), Err(403));
+        assert_eq!(authorize_request(&state, &request), Err(AuthError::Status(403)));
 
         cleanup(&db_path);
         Ok(())
@@ -509,7 +519,7 @@ mod tests {
             br#"{"model":"mistral","input":"hello"}"#,
         );
 
-        assert_eq!(authorize_request(&state, &request), Err(403));
+        assert_eq!(authorize_request(&state, &request), Err(AuthError::Status(403)));
 
         cleanup(&db_path);
         Ok(())
@@ -535,7 +545,7 @@ mod tests {
             br#"{"model":"reranker","query":"q","documents":["d"]}"#,
         );
 
-        assert_eq!(authorize_request(&state, &request), Err(403));
+        assert_eq!(authorize_request(&state, &request), Err(AuthError::Status(403)));
 
         cleanup(&db_path);
         Ok(())
@@ -559,7 +569,7 @@ mod tests {
             .headers
             .insert("node".to_string(), "worker-a".to_string());
 
-        assert_eq!(authorize_request(&state, &request), Err(403));
+        assert_eq!(authorize_request(&state, &request), Err(AuthError::Status(403)));
 
         cleanup(&db_path);
         Ok(())
@@ -585,7 +595,7 @@ mod tests {
             br#"{"model":"llama3"}"#,
         );
 
-        assert_eq!(authorize_request(&state, &request), Err(403));
+        assert_eq!(authorize_request(&state, &request), Err(AuthError::Status(403)));
 
         cleanup(&db_path);
         Ok(())
@@ -606,7 +616,7 @@ mod tests {
         )?;
         let request = request_with_auth_to("POST", "/sleep", Some(&token), br#"{"level":1}"#);
 
-        assert_eq!(authorize_request(&state, &request), Err(403));
+        assert_eq!(authorize_request(&state, &request), Err(AuthError::Status(403)));
 
         cleanup(&db_path);
         Ok(())
