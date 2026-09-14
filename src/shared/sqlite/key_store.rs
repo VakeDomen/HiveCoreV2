@@ -35,6 +35,7 @@ impl SqliteKeyStore {
         capture: bool,
         whitelist_models: Vec<String>,
         blacklist_models: Vec<String>,
+        rate_limit_tier: String,
     ) -> io::Result<KeyRecord> {
         let mut connection = self
             .connection
@@ -43,9 +44,9 @@ impl SqliteKeyStore {
         let transaction = connection.transaction().map_err(to_io_error)?;
         transaction
             .execute(
-                "INSERT INTO keys (name, value, role, capture)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![name, token, role.as_str(), capture],
+                "INSERT INTO keys (name, value, role, capture, rate_limit_tier)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![name, token, role.as_str(), capture, rate_limit_tier],
             )
             .map_err(to_io_error)?;
         let key_id = transaction.last_insert_rowid();
@@ -73,6 +74,7 @@ impl SqliteKeyStore {
             whitelist_models,
             blacklist_models,
             capture,
+            rate_limit_tier,
         })
     }
 
@@ -83,7 +85,7 @@ impl SqliteKeyStore {
             .map_err(|_| io::Error::other("key database mutex poisoned"))?;
         let mut statement = connection
             .prepare(
-                "SELECT id, name, value, role, capture
+                "SELECT id, name, value, role, capture, rate_limit_tier
                  FROM keys
                  WHERE deleted = 0
                  ORDER BY id ASC",
@@ -99,6 +101,7 @@ impl SqliteKeyStore {
                     whitelist_models: Vec::new(),
                     blacklist_models: Vec::new(),
                     capture: row.get(4)?,
+                    rate_limit_tier: row.get::<_, String>(5).unwrap_or_else(|_| "low".to_string()),
                 })
             })
             .map_err(to_io_error)?;
@@ -124,7 +127,7 @@ impl SqliteKeyStore {
             .map_err(|_| io::Error::other("key database mutex poisoned"))?;
         let mut statement = connection
             .prepare(
-                "SELECT id, name, value, role, capture
+                "SELECT id, name, value, role, capture, rate_limit_tier
                  FROM keys
                  WHERE value = ?1 AND deleted = 0",
             )
@@ -140,6 +143,7 @@ impl SqliteKeyStore {
                     whitelist_models: Vec::new(),
                     blacklist_models: Vec::new(),
                     capture: row.get(4)?,
+                    rate_limit_tier: row.get::<_, String>(5).unwrap_or_else(|_| "low".to_string()),
                 })
             })
             .optional()
@@ -163,6 +167,7 @@ impl SqliteKeyStore {
         id: i64,
         name: Option<String>,
         capture: Option<bool>,
+        rate_limit_tier: Option<String>,
     ) -> io::Result<Option<KeyRecord>> {
         let mut connection = self
             .connection
@@ -185,6 +190,14 @@ impl SqliteKeyStore {
                 .execute(
                     "UPDATE keys SET capture = ?1 WHERE id = ?2",
                     params![capture, id],
+                )
+                .map_err(to_io_error)?;
+        }
+        if let Some(ref tier) = rate_limit_tier {
+            transaction
+                .execute(
+                    "UPDATE keys SET rate_limit_tier = ?1 WHERE id = ?2",
+                    params![tier, id],
                 )
                 .map_err(to_io_error)?;
         }
@@ -231,7 +244,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), SqlError> {
              ON key_model_rules (key_id, list_type, model);",
     )?;
     ensure_keys_capture_column(connection)?;
-    ensure_keys_deleted_column(connection)
+    ensure_keys_deleted_column(connection)?;
+    ensure_keys_rate_limit_tier_column(connection)
 }
 
 fn count_keys(connection: &Connection) -> Result<i64, SqlError> {
@@ -241,8 +255,8 @@ fn count_keys(connection: &Connection) -> Result<i64, SqlError> {
 fn seed_bootstrap_admin(connection: &Connection) -> Result<(), SqlError> {
     let token = Uuid::new_v4().to_string();
     connection.execute(
-        "INSERT OR IGNORE INTO keys (name, value, role, capture)
-         VALUES (?1, ?2, ?3, 0)",
+        "INSERT OR IGNORE INTO keys (name, value, role, capture, rate_limit_tier)
+         VALUES (?1, ?2, ?3, 0, 'unlimited')",
         params!["admin", token, Role::Admin.as_str()],
     )?;
     log::warn("created initial admin key in sqlite database");
@@ -260,6 +274,17 @@ fn ensure_keys_capture_column(connection: &Connection) -> Result<(), SqlError> {
     }
     connection.execute(
         "ALTER TABLE keys ADD COLUMN capture INTEGER NOT NULL DEFAULT 0",
+        [],
+    )?;
+    Ok(())
+}
+
+fn ensure_keys_rate_limit_tier_column(connection: &Connection) -> Result<(), SqlError> {
+    if table_has_column(connection, "keys", "rate_limit_tier")? {
+        return Ok(());
+    }
+    connection.execute(
+        "ALTER TABLE keys ADD COLUMN rate_limit_tier TEXT NOT NULL DEFAULT 'low'",
         [],
     )?;
     Ok(())
@@ -293,7 +318,7 @@ fn table_has_column(
 
 fn fetch_key_by_id(connection: &Connection, id: i64) -> Result<Option<KeyRecord>, SqlError> {
     let mut statement = connection.prepare(
-        "SELECT id, name, value, role, capture
+        "SELECT id, name, value, role, capture, rate_limit_tier
          FROM keys
          WHERE id = ?1 AND deleted = 0",
     )?;
@@ -308,6 +333,7 @@ fn fetch_key_by_id(connection: &Connection, id: i64) -> Result<Option<KeyRecord>
                 whitelist_models: Vec::new(),
                 blacklist_models: Vec::new(),
                 capture: row.get(4)?,
+                rate_limit_tier: row.get::<_, String>(5).unwrap_or_else(|_| "low".to_string()),
             })
         })
         .optional()?;

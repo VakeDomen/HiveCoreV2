@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::app::models::config::Config;
+use crate::app::models::config::{Config, RateLimitTier};
 
 impl Config {
     pub fn load_or_create(path: &str) -> io::Result<Self> {
@@ -92,6 +92,20 @@ impl Config {
                 ("Telegram", "MESSAGE_THREAD_ID") => {
                     config.telegram_message_thread_id = value.parse::<i64>().ok();
                 }
+                ("RateLimit", _) if key.starts_with("TIER_") => {
+                    let tier_name = key.strip_prefix("TIER_").unwrap_or("").to_string();
+                    if !tier_name.is_empty() {
+                        if let Some(tier) = parse_rate_limit_tier(value) {
+                            config.rate_limit_tiers.insert(tier_name, tier);
+                        }
+                    }
+                }
+                ("RateLimit", "DEFAULT_TIER") => {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        config.default_rate_limit_tier = trimmed.to_string();
+                    }
+                }
                 _ => {}
             }
         }
@@ -100,8 +114,29 @@ impl Config {
     }
 
     fn to_ini(&self) -> String {
+        let mut rate_limit_lines = String::new();
+        rate_limit_lines.push_str("\n\n[RateLimit]\n");
+        let mut tier_names: Vec<_> = self.rate_limit_tiers.keys().collect();
+        tier_names.sort();
+        for name in tier_names {
+            if let Some(tier) = self.rate_limit_tiers.get(name) {
+                rate_limit_lines.push_str(&format!(
+                    "TIER_{name} = {}/min, {}/hour, {}/day, {}/week, {}/month, {}/concurrent\n",
+                    tier.requests_per_minute,
+                    tier.requests_per_hour,
+                    tier.requests_per_day,
+                    tier.requests_per_week,
+                    tier.requests_per_month,
+                    tier.max_concurrent,
+                ));
+            }
+        }
+        rate_limit_lines.push_str(&format!(
+            "DEFAULT_TIER = {}\n",
+            self.default_rate_limit_tier
+        ));
         format!(
-            "[Server]\nUSER_AUTHENTICATION = {}\nPROXY_PORT = {}\nNODE_CONNECTION_PORT = {}\nMANAGEMENT_CONNECTION_PORT = {}\n\n[Connection]\nPOLLING_NODE_CONNECTION_TIMEOUT = {}\nWORKING_NODE_CONNECTION_TIMEOUT = {}\nPROXY_TIMEOUT_MS = {}\nMESSAGE_CHUNK_BUFFER_SIZE = {}\n\n[Database]\nDATABASE_URL = {}\n\n[Capture]\nCAPTURE_DIR = {}\n\n[Telegram]\nBOT_TOKEN = {}\nUSER_ID = {}\n",
+            "[Server]\nUSER_AUTHENTICATION = {}\nPROXY_PORT = {}\nNODE_CONNECTION_PORT = {}\nMANAGEMENT_CONNECTION_PORT = {}\n\n[Connection]\nPOLLING_NODE_CONNECTION_TIMEOUT = {}\nWORKING_NODE_CONNECTION_TIMEOUT = {}\nPROXY_TIMEOUT_MS = {}\nMESSAGE_CHUNK_BUFFER_SIZE = {}\n\n[Database]\nDATABASE_URL = {}\n\n[Capture]\nCAPTURE_DIR = {}\n\n[Telegram]\nBOT_TOKEN = {}\nUSER_ID = {}",
             self.user_authentication,
             self.proxy_port,
             self.node_connection_port,
@@ -114,7 +149,7 @@ impl Config {
             self.capture_dir,
             self.telegram_bot_token.as_deref().unwrap_or(""),
             format_telegram_target(self.telegram_user_id, self.telegram_message_thread_id)
-        )
+        ) + &rate_limit_lines
     }
 }
 
@@ -143,6 +178,27 @@ fn parse_telegram_target(value: &str) -> Option<(i64, Option<i64>)> {
         chat_id.trim().parse::<i64>().ok()?,
         Some(thread_id.trim().parse::<i64>().ok()?),
     ))
+}
+
+fn parse_rate_limit_tier(value: &str) -> Option<RateLimitTier> {
+    let mut tier = RateLimitTier::unlimited();
+    for part in value.split(',') {
+        let part = part.trim();
+        let Some((num_str, window)) = part.split_once('/') else {
+            continue;
+        };
+        let num = num_str.trim().parse::<u64>().ok()?;
+        match window.trim().to_ascii_lowercase().as_str() {
+            "min" | "minute" => tier.requests_per_minute = num,
+            "hour" => tier.requests_per_hour = num,
+            "day" => tier.requests_per_day = num,
+            "week" => tier.requests_per_week = num,
+            "month" => tier.requests_per_month = num,
+            "concurrent" => tier.max_concurrent = num,
+            _ => {}
+        }
+    }
+    Some(tier)
 }
 
 fn format_telegram_target(chat_id: Option<i64>, message_thread_id: Option<i64>) -> String {

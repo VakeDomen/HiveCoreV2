@@ -269,6 +269,10 @@ fn handle_poll(
             request_uri,
             log::bold(log::format_duration(queue_wait))
         ));
+        // Track concurrent in-flight requests for rate limiting
+        if let Some(key_id) = task.context.key_id {
+            state.rate_limiter.start_request(key_id);
+        }
         write_framed_request(writer, &bytes)?;
 
         let mut response_capture = task.context.capture.then(ResponseCaptureBuilder::default);
@@ -382,6 +386,11 @@ fn handle_poll(
                 created_at,
             };
             let _ = state.stats_tx.send(usage_event);
+        }
+
+        // Request is done — decrement concurrent counter
+        if let Some(key_id) = task.context.key_id {
+            state.rate_limiter.finish_request(key_id);
         }
 
         touch_worker(

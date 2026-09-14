@@ -673,9 +673,12 @@ function renderKeys() {
     return;
   }
   const headers = state.managementWrite
-    ? ["ID", "Name", "Token", "Role", "Capture", "Whitelist", "Blacklist", "Actions"]
-    : ["ID", "Name", "Role", "Capture", "Whitelist", "Blacklist"];
+    ? ["ID", "Name", "Token", "Role", "Rate Limit", "Capture", "Whitelist", "Blacklist", "Actions"]
+    : ["ID", "Name", "Role", "Rate Limit", "Capture", "Whitelist", "Blacklist"];
   const rows = keys.map((key) => {
+    const tierOptions = ["low", "medium", "high", "unlimited"]
+      .map((t) => `<option value="${t}"${t === key.rate_limit_tier ? " selected" : ""}>${t}</option>`)
+      .join("");
     const common = state.managementWrite
       ? [
           key.id,
@@ -684,6 +687,7 @@ function renderKeys() {
             ? `<button class="token-copy" data-action="copy-token" data-token="${escapeAttr(key.token)}" title="Copy token">${escapeHtml(maskToken(key.token))}</button>`
             : `<span class="muted">redacted</span>`,
           escapeHtml(key.role),
+          `<select class="tier-select" data-key-tier="${key.id}">${tierOptions}</select>`,
           `<label class="check"><input data-key-capture="${key.id}" type="checkbox" ${key.capture ? "checked" : ""} /> capture</label>`,
           tags(key.whitelist_models),
           tags(key.blacklist_models),
@@ -694,6 +698,7 @@ function renderKeys() {
           key.id,
           escapeHtml(key.name),
           escapeHtml(key.role),
+          escapeHtml(key.rate_limit_tier || "low"),
           key.capture ? "yes" : "no",
           tags(key.whitelist_models),
           tags(key.blacklist_models),
@@ -987,11 +992,16 @@ function renderUsageBars(
 
 function renderUsageKeys(rows) {
   const sorted = sortUsageRows(rows, "keys");
+  const keyTierMap = {};
+  for (const key of state.data.keys || []) {
+    if (key.id != null) keyTierMap[key.id] = key.rate_limit_tier || "low";
+  }
   $("#usage-keys").innerHTML = sorted.length
     ? usageTable(
         "keys",
         [
           { label: "Client", field: "label", type: "text" },
+          { label: "Tier", field: "tier", type: "text" },
           { label: "Req", field: "requests" },
           { label: "Err", field: "errors" },
           { label: "Input", field: "prompt_tokens" },
@@ -1000,9 +1010,12 @@ function renderUsageKeys(rows) {
           { label: "Time", field: "time" },
           { label: "Out tok/s", field: "out_tps" },
         ],
-        sorted.map((row) =>
-          usageRowCells(row, row.key_name || `key ${row.key_id ?? "-"}`),
-        ),
+        sorted.map((row) => {
+          const cells = usageRowCells(row, row.key_name || `key ${row.key_id ?? "-"}`);
+          const tier = row.key_id != null ? keyTierMap[row.key_id] || "-" : "-";
+          cells.splice(1, 0, escapeHtml(tier));
+          return cells;
+        }),
       )
     : empty();
 }
@@ -1173,6 +1186,11 @@ function compareUsageRows(a, b, field) {
   if (field === "label") {
     return usageLabel(a).localeCompare(usageLabel(b));
   }
+  if (field === "tier") {
+    const ta = a.key_id != null ? (keyTierForRow(a) || "") : "";
+    const tb = b.key_id != null ? (keyTierForRow(b) || "") : "";
+    return ta.localeCompare(tb);
+  }
   if (field === "backend") {
     return String(a.backend || "").localeCompare(String(b.backend || ""));
   }
@@ -1183,6 +1201,14 @@ function compareUsageRows(a, b, field) {
   if (field === "out_tps") return outputTokensPerSecondNumber(a) - outputTokensPerSecondNumber(b);
   if (field === "total_tokens") return statTotalTokens(a) - statTotalTokens(b);
   return statValue(a, field) - statValue(b, field);
+}
+
+function keyTierForRow(row) {
+  if (row.key_id == null) return null;
+  for (const key of state.data.keys || []) {
+    if (key.id === row.key_id) return key.rate_limit_tier || "low";
+  }
+  return null;
 }
 
 function usageLabel(row) {
@@ -1276,6 +1302,7 @@ async function createKey(event) {
     capture: $("#new-key-capture").checked,
     whitelist_models: splitCsv($("#new-key-whitelist").value),
     blacklist_models: splitCsv($("#new-key-blacklist").value),
+    rate_limit_tier: $("#new-key-tier").value,
   };
   const response = await api("management", "/key", {
     method: "POST",
@@ -1316,9 +1343,10 @@ function fallbackCopy(text) {
 async function saveKey(id) {
   const name = document.querySelector(`[data-key-name="${id}"]`).value.trim();
   const capture = document.querySelector(`[data-key-capture="${id}"]`).checked;
+  const tier = document.querySelector(`[data-key-tier="${id}"]`).value;
   const response = await api("management", "/key", {
     method: "PATCH",
-    body: { id, name, capture },
+    body: { id, name, capture, rate_limit_tier: tier },
     expected: [200, 400, 404, 409, 500],
   });
   if (response.status !== 200)

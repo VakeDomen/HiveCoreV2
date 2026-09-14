@@ -9,4 +9,5 @@ pub struct KeyRecord {
     pub whitelist_models: Vec<String>,
     pub blacklist_models: Vec<String>,
     pub capture: bool,
+    pub rate_limit_tier: String,
 }

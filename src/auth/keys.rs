@@ -54,6 +54,7 @@ impl KeyStore {
         capture: bool,
         whitelist_models: Vec<String>,
         blacklist_models: Vec<String>,
+        rate_limit_tier: String,
     ) -> io::Result<KeyRecord> {
         let record = self.database.insert_key(
             token,
@@ -62,6 +63,7 @@ impl KeyStore {
             capture,
             whitelist_models,
             blacklist_models,
+            rate_limit_tier,
         )?;
         if let Ok(mut guard) = self.cache.write() {
             guard.insert(record.token.clone(), record.clone());
@@ -78,8 +80,9 @@ impl KeyStore {
         id: i64,
         name: Option<String>,
         capture: Option<bool>,
+        rate_limit_tier: Option<String>,
     ) -> io::Result<Option<KeyRecord>> {
-        let record = self.database.update_key(id, name, capture)?;
+        let record = self.database.update_key(id, name, capture, rate_limit_tier)?;
         self.refresh_cache()?;
         Ok(record)
     }
@@ -234,6 +237,7 @@ mod tests {
             false,
             vec!["qwen3:0.6b".to_string()],
             vec!["hidden-model".to_string()],
+            "low".to_string(),
         )?;
 
         assert_eq!(inserted.whitelist_models, vec!["qwen3:0.6b"]);
@@ -265,6 +269,7 @@ mod tests {
             true,
             vec!["llama3".to_string(), "mistral".to_string()],
             vec!["deepseek".to_string()],
+            "low".to_string(),
         )?;
 
         assert_eq!(inserted.name, "worker-a");
@@ -295,11 +300,12 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
+            "low".to_string(),
         )?;
 
         assert!(!inserted.capture);
         let updated = store
-            .update_key(inserted.id, None, Some(true))?
+            .update_key(inserted.id, None, Some(true), None)?
             .expect("key should exist");
         assert!(updated.capture);
         let verified = store
@@ -323,10 +329,11 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
+            "low".to_string(),
         )?;
 
         let updated = store
-            .update_key(inserted.id, Some("bob".to_string()), None)?
+            .update_key(inserted.id, Some("bob".to_string()), None, None)?
             .expect("key should exist");
         assert_eq!(updated.name, "bob");
         let verified = store
@@ -349,6 +356,7 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
+            "low".to_string(),
         )?;
         store.insert(
             Uuid::new_v4().to_string(),
@@ -357,9 +365,10 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
+            "low".to_string(),
         )?;
 
-        let result = store.update_key(first.id, Some("bob".to_string()), None);
+        let result = store.update_key(first.id, Some("bob".to_string()), None, None);
         assert!(matches!(
             result,
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists
@@ -381,6 +390,7 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
+            "low".to_string(),
         )?;
 
         assert!(store.verify(&token, &[Role::Client]).is_some());
@@ -424,6 +434,7 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
+            "low".to_string(),
         )?;
 
         let duplicate = store.insert(
@@ -433,6 +444,7 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
+            "low".to_string(),
         );
 
         assert!(matches!(
@@ -456,6 +468,7 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
+            "low".to_string(),
         )?;
 
         assert!(store.verify(&token, &[Role::Worker]).is_some());
@@ -477,6 +490,7 @@ mod tests {
             false,
             vec!["llama3".to_string()],
             Vec::new(),
+            "low".to_string(),
         )?;
 
         let first = store.verify(&token, &[Role::Client]).expect("first verify");
@@ -503,6 +517,7 @@ mod tests {
             whitelist_models: vec!["llama3".to_string(), "mistral".to_string()],
             blacklist_models: vec!["mistral".to_string()],
             capture: false,
+            rate_limit_tier: "low".to_string(),
         };
 
         assert!(record.allows_model("llama3"));
@@ -520,6 +535,7 @@ mod tests {
             whitelist_models: Vec::new(),
             blacklist_models: vec!["forbidden".to_string()],
             capture: false,
+            rate_limit_tier: "low".to_string(),
         };
 
         assert!(record.allows_model("llama3"));
@@ -536,6 +552,7 @@ mod tests {
             whitelist_models: vec!["bge-m3".to_string()],
             blacklist_models: Vec::new(),
             capture: false,
+            rate_limit_tier: "low".to_string(),
         };
 
         assert!(record.allows_model("bge-m3"));
@@ -552,6 +569,7 @@ mod tests {
             whitelist_models: vec!["bge-m3:latest".to_string()],
             blacklist_models: Vec::new(),
             capture: false,
+            rate_limit_tier: "low".to_string(),
         };
 
         assert!(record.allows_model("bge-m3"));
@@ -569,6 +587,7 @@ mod tests {
             whitelist_models: Vec::new(),
             blacklist_models: vec!["bge-m3".to_string()],
             capture: false,
+            rate_limit_tier: "low".to_string(),
         };
 
         assert!(!record.allows_model("bge-m3"));

@@ -50,9 +50,13 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
     };
 
     if let Err(status) = authorize_request(&state, &request) {
-        let reason = match status {
-            403 => "Forbidden",
-            _ => "Unauthorized",
+        let (reason, body): (&str, Vec<u8>) = match status {
+            403 => ("Forbidden", Vec::new()),
+            429 => (
+                "Too Many Requests",
+                br#"{"error":"rate_limit_exceeded","message":"too many requests"}"#.to_vec(),
+            ),
+            _ => ("Unauthorized", Vec::new()),
         };
         log::warn(format!(
             "rejected client request method={} uri={} status={} total={}",
@@ -61,7 +65,7 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
             log::bold(status.to_string()),
             log::bold(log::format_duration(started_at.elapsed()))
         ));
-        return HttpResponse::new(status, reason, Vec::new()).write_to(&mut stream);
+        return HttpResponse::new(status, reason, body).write_to(&mut stream);
     }
 
     let request_method = request.method.clone();
@@ -334,6 +338,7 @@ mod tests {
             false,
             vec!["llama3".to_string()],
             Vec::new(),
+            "unlimited".to_string(),
         )?;
 
         let mut headers = HashMap::new();
@@ -363,6 +368,7 @@ mod tests {
             false,
             vec!["llama3".to_string()],
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let request = request_with_auth(Some(&token), br#"{"model":"llama3"}"#);
 
@@ -383,6 +389,7 @@ mod tests {
             false,
             vec!["bge-m3".to_string()],
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let request = request_with_auth(Some(&token), br#"{"model":"bge-m3:latest"}"#);
 
@@ -403,6 +410,7 @@ mod tests {
             false,
             vec!["llama3".to_string()],
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let request = request_with_auth(Some(&token), br#"{"model":"mistral"}"#);
 
@@ -423,6 +431,7 @@ mod tests {
             false,
             vec!["llama3".to_string()],
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let request =
             request_with_auth_to("POST", "/api/show", Some(&token), br#"{"name":"mistral"}"#);
@@ -444,6 +453,7 @@ mod tests {
             false,
             vec!["llama3".to_string(), "mistral".to_string()],
             vec!["mistral".to_string()],
+            "unlimited".to_string(),
         )?;
         let request = request_with_auth(Some(&token), br#"{"model":"mistral"}"#);
 
@@ -464,6 +474,7 @@ mod tests {
             false,
             vec!["llama3".to_string()],
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let request = request_with_auth_to(
             "POST",
@@ -489,6 +500,7 @@ mod tests {
             false,
             vec!["llama3".to_string()],
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let request = request_with_auth_to(
             "POST",
@@ -514,6 +526,7 @@ mod tests {
             false,
             vec!["llama3".to_string()],
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let request = request_with_auth_to(
             "POST",
@@ -539,6 +552,7 @@ mod tests {
             false,
             vec!["llama3".to_string()],
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let mut request = request_with_auth(Some(&token), br#"{"model":"llama3"}"#);
         request
@@ -562,6 +576,7 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let request = request_with_auth_to(
             "DELETE",
@@ -587,6 +602,7 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let request = request_with_auth_to("POST", "/sleep", Some(&token), br#"{"level":1}"#);
 
@@ -607,6 +623,7 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let request = request_with_auth_to("GET", "/load", Some(&token), b"");
 
@@ -627,6 +644,7 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let mut request = request_with_auth(Some(&token), br#"{"model":"llama3"}"#);
         request

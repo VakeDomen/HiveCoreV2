@@ -1176,7 +1176,7 @@ main {
 }
 
 .inline-form {
-    grid-template-columns: 1.1fr 120px 100px 1.2fr 1.2fr auto;
+    grid-template-columns: 1.1fr 120px 100px 1.2fr 1.2fr 110px auto;
     margin-bottom: 12px;
 }
 
@@ -1368,6 +1368,13 @@ th {
     font-size: 12px;
     font-weight: 700;
     text-transform: uppercase;
+}
+
+.tier-select {
+    width: auto;
+    min-width: 90px;
+    padding: 4px 6px;
+    font-size: 13px;
 }
 
 .sort-button {

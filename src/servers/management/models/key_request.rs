@@ -13,6 +13,12 @@ pub struct KeyRequest {
     pub whitelist_models: Vec<String>,
     #[serde(default)]
     pub blacklist_models: Vec<String>,
+    #[serde(default = "default_rate_limit_tier")]
+    pub rate_limit_tier: String,
+}
+
+fn default_rate_limit_tier() -> String {
+    "low".to_string()
 }
 
 fn default_name() -> String {

@@ -32,6 +32,9 @@ pub fn post_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
     };
     let generated_token = Uuid::new_v4().to_string();
 
+    let rate_limit_tier = payload.rate_limit_tier.clone();
+    let tier_for_insert = rate_limit_tier.clone();
+
     match payload.role {
         Role::Admin => render_key_create_response(
             state.keys.insert(
@@ -41,6 +44,7 @@ pub fn post_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
                 payload.capture,
                 payload.whitelist_models.clone(),
                 payload.blacklist_models.clone(),
+                tier_for_insert,
             ),
             &payload.name,
             &generated_token,
@@ -54,6 +58,7 @@ pub fn post_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
                 payload.capture,
                 payload.whitelist_models.clone(),
                 payload.blacklist_models.clone(),
+                tier_for_insert,
             ),
             &payload.name,
             &generated_token,
@@ -67,6 +72,7 @@ pub fn post_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
                 payload.capture,
                 payload.whitelist_models.clone(),
                 payload.blacklist_models.clone(),
+                tier_for_insert,
             ),
             &payload.name,
             &generated_token,
@@ -80,6 +86,7 @@ pub fn post_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
                 payload.capture,
                 payload.whitelist_models.clone(),
                 payload.blacklist_models.clone(),
+                tier_for_insert,
             ),
             &payload.name,
             &generated_token,
@@ -108,11 +115,17 @@ pub fn patch_key(state: &AppState, request: &HttpRequest) -> HttpResponse {
         None => None,
     };
 
-    if name.is_none() && payload.capture.is_none() {
+    let rate_limit_tier = payload
+        .rate_limit_tier
+        .as_ref()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+
+    if name.is_none() && payload.capture.is_none() && rate_limit_tier.is_none() {
         return HttpResponse::new(400, "Bad Request", b"No key updates provided".to_vec());
     }
 
-    match state.keys.update_key(payload.id, name, payload.capture) {
+    match state.keys.update_key(payload.id, name, payload.capture, rate_limit_tier) {
         Ok(Some(record)) => json_response(200, "OK", json!(KeyResponse::from(record))),
         Ok(None) => HttpResponse::new(404, "Not Found", Vec::new()),
         Err(err) => {
@@ -208,6 +221,7 @@ struct KeyResponse {
     whitelist_models: Vec<String>,
     blacklist_models: Vec<String>,
     capture: bool,
+    rate_limit_tier: String,
 }
 
 impl KeyResponse {
@@ -220,6 +234,7 @@ impl KeyResponse {
             whitelist_models: value.whitelist_models,
             blacklist_models: value.blacklist_models,
             capture: value.capture,
+            rate_limit_tier: value.rate_limit_tier,
         }
     }
 }
@@ -246,6 +261,7 @@ mod tests {
             whitelist_models: vec!["qwen".to_string()],
             blacklist_models: Vec::new(),
             capture: true,
+            rate_limit_tier: "low".to_string(),
         }
     }
 

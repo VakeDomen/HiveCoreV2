@@ -974,6 +974,7 @@ mod tests {
             false,
             vec!["llama3".to_string()],
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let mut workers = HashMap::new();
         workers.insert(
@@ -1009,6 +1010,7 @@ mod tests {
             false,
             vec!["bge-m3".to_string()],
             Vec::new(),
+            "unlimited".to_string(),
         )?;
         let mut workers = HashMap::new();
         workers.insert(

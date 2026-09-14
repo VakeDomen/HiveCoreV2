@@ -5,6 +5,7 @@ pub struct KeyUpdateRequest {
     pub id: i64,
     pub name: Option<String>,
     pub capture: Option<bool>,
+    pub rate_limit_tier: Option<String>,
 }
 
 #[cfg(test)]

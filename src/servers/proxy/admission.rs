@@ -58,6 +58,19 @@ pub fn authorize_request(state: &AppState, request: &HttpRequest) -> Result<(), 
                 return Err(403);
             }
         }
+
+        // Rate limit check
+        let tier = state
+            .rate_limiter
+            .resolve_tier(&key.rate_limit_tier);
+        let result = state.rate_limiter.check(key.id, &tier);
+        if !result.allowed {
+            log::warn(format!(
+                "rate limited key={} method={} uri={} retry_after={:?}",
+                key.name, request.method, request.uri, result.retry_after_secs
+            ));
+            return Err(429);
+        }
     }
 
     Ok(())
