@@ -225,6 +225,42 @@ impl RateLimiter {
             key_state.concurrent = key_state.concurrent.saturating_sub(1).max(0);
         }
     }
+
+    /// Query the current rate limiter snapshot for a key. Returns `None` if the key
+    /// has no state yet (no recent activity). Prunes expired entries during the read.
+    pub fn snapshot(&self, key_id: i64) -> Option<RateLimitSnapshot> {
+        let mut guard = self.state.lock().ok()?;
+        let key_state = guard.get_mut(&key_id)?;
+        let now = Instant::now();
+        let mut windows = Vec::new();
+        for (name, (dur, ws)) in &mut key_state.windows {
+            let count = ws.prune_and_count(*dur, now);
+            let window_secs = dur.as_secs();
+            windows.push(RateLimitWindowSnapshot {
+                name: name.to_string(),
+                window_secs,
+                count: count as u64,
+            });
+        }
+        Some(RateLimitSnapshot {
+            concurrent: key_state.concurrent.max(0) as u64,
+            windows,
+        })
+    }
+}
+
+/// Snapshot of the current rate limiter state for a key.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RateLimitSnapshot {
+    pub concurrent: u64,
+    pub windows: Vec<RateLimitWindowSnapshot>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RateLimitWindowSnapshot {
+    pub name: String,
+    pub window_secs: u64,
+    pub count: u64,
 }
 
 #[cfg(test)]

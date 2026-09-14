@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::app::{AppState, authorize_management};
-use crate::auth::Role;
+use crate::auth::{KeyRecord, Role};
 use crate::servers::management::routes;
 use crate::shared::http::{HttpResponse, read_request};
 use crate::shared::log;
@@ -47,6 +47,41 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         .split('?')
         .next()
         .unwrap_or(request.uri.as_str());
+
+    // Self-service /key/me routes — any valid key can access its own info.
+    if route_path.starts_with("/key/me") {
+        let Some(key) = request
+            .bearer_token()
+            .and_then(|token| state.keys.verify(token, &[Role::Admin, Role::Client, Role::Analytics, Role::Worker]))
+        else {
+            log::warn(format!(
+                "rejected /key/me request without valid key method={} uri={}",
+                request.method, request.uri
+            ));
+            return HttpResponse::new(403, "Unauthorized", Vec::new()).write_to(&mut stream);
+        };
+
+        let response = match (request.method.as_str(), route_path) {
+            ("GET", "/key/me") => routes::me::get_me(&state, &key),
+            ("GET", "/key/me/usage") => {
+                let query = request.uri.split('?').nth(1).unwrap_or("");
+                routes::me::get_me_usage(&state, &key, query)
+            }
+            ("GET", "/key/me/limits") => routes::me::get_me_limits(&state, &key),
+            _ => HttpResponse::new(404, "Not Found", Vec::new()),
+        };
+        let status_code = response.status_code;
+        response.write_to(&mut stream)?;
+        log::info(format!(
+            "management request method={} uri={} status={} total={}",
+            request.method,
+            request.uri,
+            log::bold(status_code.to_string()),
+            log::bold(log::format_duration(started_at.elapsed()))
+        ));
+        return Ok(());
+    }
+
     let Some(permission) = management_permission(&request.method, route_path) else {
         return HttpResponse::new(404, "Not Found", Vec::new()).write_to(&mut stream);
     };

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct RateLimitTier {
     /// 0 means unlimited for that window.
     pub requests_per_minute: u64,

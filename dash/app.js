@@ -183,7 +183,6 @@ function bindEvents() {
       return removePromptImage(actionTarget.dataset.id);
     if (action === "delete-key")
       return deleteKey(Number(actionTarget.dataset.id));
-    if (action === "save-key") return saveKey(Number(actionTarget.dataset.id));
     if (action === "copy-token") return copyToken(actionTarget.dataset.token);
     if (action === "select-model") {
       return selectModel(
@@ -195,6 +194,13 @@ function bindEvents() {
   });
 
   $("#create-key-form").addEventListener("submit", createKey);
+
+  // Auto-save on change for inline key edits
+  $("#keys-table").addEventListener("change", (event) => {
+    const el = event.target;
+    const id = el.dataset.autoSave;
+    if (id) saveKey(Number(id));
+  });
   $("#worker-command-form").addEventListener("submit", sendWorkerCommand);
   $("#worker-model-filter").addEventListener("input", () => {
     state.workerModelFilter = $("#worker-model-filter").value.trim();
@@ -254,7 +260,7 @@ async function connect() {
     state.refreshIntervalMs = Number($("#refresh-interval").value || 5000);
     state.data.keys = adminProbe.body;
     setStatus(canSeeTokens ? "Connected as admin." : "Connected as analytics.");
-    await Promise.all([loadWorkers(), loadQueue(), loadOllamaTags(), loadOpenAiModels()]);
+    await Promise.all([loadWorkers(), loadQueue(), loadOllamaTags(), loadOpenAiModels(), loadMyKey()]);
   } else {
     const modelProbe = await api("proxy", "/api/tags", {
       expected: [200, 401, 403, 404, 500],
@@ -276,7 +282,7 @@ async function connect() {
     $("#refresh-interval").value = "0";
     setStatus("Connected as client.");
     if (modelProbe.status === 200) state.data.ollamaTags = modelProbe.body;
-    await loadOpenAiModels({ quiet: true });
+    await Promise.all([loadOpenAiModels({ quiet: true }), loadMyKey()]);
   }
 
   renderRole();
@@ -298,6 +304,9 @@ function resetData() {
     ollamaTags: null,
     openaiModels: null,
     usage: null,
+    myKey: null,
+    myLimits: null,
+    myUsage: null,
   };
   state.selectedModel = null;
   state.lastRequest = null;
@@ -377,6 +386,7 @@ async function refreshCurrentView(options = {}) {
       state.managementRead ? loadQueue({ quiet: true }) : Promise.resolve(),
       loadOllamaTags({ quiet: true }),
       loadOpenAiModels({ quiet: true }),
+      loadMyKey(),
     ]);
   }
   if (view === "models")
@@ -399,6 +409,19 @@ async function loadKeys() {
   const response = await api("management", "/key");
   state.data.keys = response.body;
   renderKeys();
+}
+
+async function loadMyKey() {
+  const today = localDateString(new Date());
+  const [meRes, limitsRes, usageRes] = await Promise.all([
+    api("management", "/key/me", { expected: [200, 403, 401] }),
+    api("management", "/key/me/limits", { expected: [200, 403, 401] }),
+    api("management", `/key/me/usage?from=${today}&to=${today}`, { expected: [200, 403, 401] }),
+  ]);
+  if (meRes.status === 200) state.data.myKey = meRes.body;
+  if (limitsRes.status === 200) state.data.myLimits = limitsRes.body;
+  if (usageRes.status === 200) state.data.myUsage = usageRes.body;
+  renderMyKey();
 }
 
 async function loadWorkers() {
@@ -462,6 +485,7 @@ async function loadOpenAiModels() {
 
 function renderAll() {
   renderRole();
+  renderMyKey();
   renderOverview();
   renderModels();
   if (state.managementRead) {
@@ -673,7 +697,7 @@ function renderKeys() {
     return;
   }
   const headers = state.managementWrite
-    ? ["ID", "Name", "Token", "Role", "Rate Limit", "Capture", "Whitelist", "Blacklist", "Actions"]
+    ? ["ID", "Name", "Token", "Role", "Rate Limit", "Capture", "Whitelist", "Blacklist", ""]
     : ["ID", "Name", "Role", "Rate Limit", "Capture", "Whitelist", "Blacklist"];
   const rows = keys.map((key) => {
     const tierOptions = ["low", "medium", "high", "unlimited"]
@@ -682,17 +706,16 @@ function renderKeys() {
     const common = state.managementWrite
       ? [
           key.id,
-          `<input data-key-name="${key.id}" value="${escapeAttr(key.name)}" />`,
+          `<input data-key-name="${key.id}" value="${escapeAttr(key.name)}" data-auto-save="${key.id}" />`,
           key.token
             ? `<button class="token-copy" data-action="copy-token" data-token="${escapeAttr(key.token)}" title="Copy token">${escapeHtml(maskToken(key.token))}</button>`
             : `<span class="muted">redacted</span>`,
           escapeHtml(key.role),
-          `<select class="tier-select" data-key-tier="${key.id}">${tierOptions}</select>`,
-          `<label class="check"><input data-key-capture="${key.id}" type="checkbox" ${key.capture ? "checked" : ""} /> capture</label>`,
+          `<select class="tier-select" data-key-tier="${key.id}" data-auto-save="${key.id}">${tierOptions}</select>`,
+          `<label class="check"><input data-key-capture="${key.id}" type="checkbox" ${key.capture ? "checked" : ""} data-auto-save="${key.id}" /> capture</label>`,
           tags(key.whitelist_models),
           tags(key.blacklist_models),
-          `<button class="small" data-action="save-key" data-id="${key.id}">Save</button>
-           <button class="small" data-action="delete-key" data-id="${key.id}">Delete</button>`,
+          `<button class="small" data-action="delete-key" data-id="${key.id}">Delete</button>`,
         ]
       : [
           key.id,
@@ -706,6 +729,90 @@ function renderKeys() {
     return common;
   });
   $("#keys-table").innerHTML = table(headers, rows);
+}
+
+function renderMyKey() {
+  const myKey = state.data.myKey;
+  const myLimits = state.data.myLimits;
+  const myUsage = state.data.myUsage;
+  const root = $("#overview-my-limits");
+  if (!myKey) {
+    root.innerHTML = `<div class="list-empty">Load key info to see limits.</div>`;
+    return;
+  }
+  const tier = myKey.rate_limit_tier || "low";
+  const tierCfg = myKey.tier || {};
+  const maxConcurrent = tierCfg.max_concurrent;
+  const snapshot = (myLimits && myLimits.snapshot) || (myKey.limits) || null;
+
+  let html = `<div class="my-limits-grid">`;
+  html += `<article class="usage-stat stat-gray"><span>Tier</span><strong>${escapeHtml(tier)}</strong></article>`;
+
+  // Concurrent
+  if (maxConcurrent != null && maxConcurrent > 0) {
+    const current = (snapshot && snapshot.concurrent) || 0;
+    const pct = Math.min(100, Math.round((current / maxConcurrent) * 100));
+    const cls = current === 0 ? "stat-gray" : pct >= 100 ? "stat-red" : pct > 50 ? "stat-yellow" : "stat-green";
+    html += `<article class="usage-stat ${cls}">
+      <span>Concurrent</span>
+      <strong>${current}/${maxConcurrent}</strong>
+      <div class="usage-bar"><span style="width:${pct}%"></span></div>
+    </article>`;
+  } else {
+    html += `<article class="usage-stat stat-gray"><span>Concurrent</span><strong>0/−</strong></article>`;
+  }
+
+  // Build a map of window data from the snapshot
+  const winMap = {};
+  if (snapshot && snapshot.windows) {
+    for (const win of snapshot.windows) {
+      winMap[win.name] = win.count;
+    }
+  }
+
+  // Always show tier windows, using snapshot data or 0
+  const windowNames = [
+    { key: "min", limitField: "requests_per_minute", label: "per min" },
+    { key: "hour", limitField: "requests_per_hour", label: "per hour" },
+    { key: "day", limitField: "requests_per_day", label: "per day" },
+    { key: "week", limitField: "requests_per_week", label: "per week" },
+    { key: "month", limitField: "requests_per_month", label: "per month" },
+  ];
+  for (const w of windowNames) {
+    const limit = tierCfg[w.limitField];
+    if (limit != null && limit > 0) {
+      const count = winMap[w.key] || 0;
+      const pct = Math.min(100, Math.round((count / limit) * 100));
+      const cls = count === 0 ? "stat-gray" : pct >= 100 ? "stat-red" : pct > 50 ? "stat-yellow" : "stat-green";
+      html += `<article class="usage-stat ${cls}">
+        <span>${w.label}</span>
+        <strong>${count}/${limit}</strong>
+        <div class="usage-bar"><span style="width:${pct}%"></span></div>
+      </article>`;
+    }
+  }
+
+  html += `</div>`;
+
+  // Today's usage summary
+  if (myUsage && myUsage.rows && myUsage.rows.length) {
+    const rows = myUsage.rows;
+    let totalReqs = 0, totalErrors = 0, totalPrompt = 0, totalCompletion = 0;
+    for (const row of rows) {
+      totalReqs += Number(row.request_count || 0);
+      totalErrors += Number(row.error_count || 0);
+      totalPrompt += Number(row.prompt_tokens || 0);
+      totalCompletion += Number(row.completion_tokens || 0);
+    }
+    html += `<div class="my-limits-grid" style="margin-top:10px">`;
+    html += `<article class="usage-stat stat-gray"><span>Today</span><strong>${formatCount(totalReqs)}</strong></article>`;
+    html += `<article class="usage-stat ${totalErrors > 0 ? "stat-red" : "stat-green"}"><span>Errors</span><strong>${formatCount(totalErrors)}</strong></article>`;
+    html += `<article class="usage-stat stat-gray"><span>Input</span><strong>${formatCount(totalPrompt)}</strong></article>`;
+    html += `<article class="usage-stat stat-gray"><span>Output</span><strong>${formatCount(totalCompletion)}</strong></article>`;
+    html += `</div>`;
+  }
+
+  root.innerHTML = html;
 }
 
 function renderWorkers() {

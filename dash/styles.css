@@ -591,6 +591,7 @@ main {
 .usage-bar span {
     display: block;
     min-width: 2px;
+    background: var(--accent);
 }
 
 .usage-bar .prompt {
@@ -687,6 +688,32 @@ main {
     font-size: 24px;
     line-height: 1.15;
     overflow-wrap: anywhere;
+}
+
+.my-limits-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.usage-stat.stat-green {
+    border-color: #addbd3;
+    background: #f5fffd;
+}
+
+.usage-stat.stat-yellow {
+    border-color: #f3d188;
+    background: #fffcf0;
+}
+
+.usage-stat.stat-red {
+    border-color: #f0b8b3;
+    background: #fff8f7;
+}
+
+.usage-stat.stat-gray {
+    border-color: #dfe6ef;
+    background: #fbfcfe;
 }
 
 .stats-layout {

@@ -1,4 +1,5 @@
 pub mod keys;
+pub mod me;
 pub mod queue;
 pub mod usage;
 pub mod worker_command;

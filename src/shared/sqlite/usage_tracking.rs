@@ -246,6 +246,38 @@ impl UsageTrackingDb {
 
         Ok((usage, workers))
     }
+
+    /// Returns usage rows for a specific key (matched by key_id, falling back to key_name).
+    pub fn usage_for_key(
+        &self,
+        key_id: i64,
+        key_name: String,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> io::Result<Vec<DailyUsageRow>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| io::Error::other("usage database mutex poisoned"))?;
+        let from = from.format("%Y-%m-%d").to_string();
+        let to = to.format("%Y-%m-%d").to_string();
+        let mut statement = connection
+            .prepare(
+                "SELECT usage_day, key_id, key_name, model, request_count, success_count, error_count, prompt_tokens, completion_tokens, total_tokens, queue_ms, worker_ms, total_ms, duration_ms
+                 FROM usage_tracking
+                 WHERE usage_day >= ?1 AND usage_day <= ?2 AND (key_id = ?3 OR key_name = ?4)
+                 ORDER BY usage_day ASC, model ASC",
+            )
+            .map_err(to_io_error)?;
+        let rows = statement
+            .query_map(params![&from, &to, key_id, &key_name], daily_usage_row)
+            .map_err(to_io_error)?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(to_io_error)?);
+        }
+        Ok(result)
+    }
 }
 
 fn daily_usage_row(row: &rusqlite::Row<'_>) -> Result<DailyUsageRow, SqlError> {
