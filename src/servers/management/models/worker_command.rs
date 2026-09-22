@@ -22,4 +22,8 @@ impl WorkerCommand {
             WorkerCommand::Shutdown => "SHUTDOWN",
         }
     }
+
+    pub fn is_update(self) -> bool {
+        matches!(self, WorkerCommand::Update)
+    }
 }

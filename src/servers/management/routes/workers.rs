@@ -149,7 +149,7 @@ fn render_worker_versions(state: &AppState) -> Value {
                         worker.name.clone(),
                         json!({
                             "hive_version": worker.hive_version,
-                            "ollama_version": worker.ollama_version,
+                            "backend_version": worker.backend_version,
                             "backend": worker.backend.as_str()
                         }),
                     )
@@ -217,7 +217,7 @@ mod tests {
                 WorkerStatus {
                     name: "worker-a".to_string(),
                     hive_version: "core".to_string(),
-                    ollama_version: "backend".to_string(),
+                    backend_version: "backend".to_string(),
                     backend: WorkerBackend::Vllm,
                     tags: Vec::new(),
                     state: WorkerPhase::Working,

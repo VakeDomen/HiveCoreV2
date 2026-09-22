@@ -48,6 +48,41 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         .next()
         .unwrap_or(request.uri.as_str());
 
+    // Public dashboard routes — no auth required
+    if matches!(request.method.as_str(), "GET" | "HEAD") {
+        if route_path == "/config.json" {
+            let response = crate::shared::dash::serve_config_json(
+                state.config.proxy_port,
+                state.config.management_connection_port,
+            );
+            let status_code = response.status_code;
+            response.write_to(&mut stream)?;
+            log::info(format!(
+                "management request method={} uri={} status={} total={}",
+                request.method,
+                request.uri,
+                log::bold(status_code.to_string()),
+                log::bold(log::format_duration(started_at.elapsed()))
+            ));
+            return Ok(());
+        }
+
+        if matches!(route_path, "/" | "/index.html" | "/app.js" | "/styles.css") {
+            if let Some(response) = crate::shared::dash::serve_file(route_path) {
+                let status_code = response.status_code;
+                response.write_to(&mut stream)?;
+                log::info(format!(
+                    "management request method={} uri={} status={} total={}",
+                    request.method,
+                    request.uri,
+                    log::bold(status_code.to_string()),
+                    log::bold(log::format_duration(started_at.elapsed()))
+                ));
+                return Ok(());
+            }
+        }
+    }
+
     // Self-service /key/me routes — any valid key can access its own info.
     if route_path.starts_with("/key/me") {
         let Some(key) = request

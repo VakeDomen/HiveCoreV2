@@ -147,7 +147,11 @@ fn request_models(request: &HttpRequest) -> Vec<String> {
         | ("POST", "/detokenize")
         | ("POST", "/api/pull")
         | ("POST", "/api/push")
-        | ("DELETE", "/api/delete") => {
+        | ("DELETE", "/api/delete")
+        | ("POST", "/")
+        | ("POST", "/v1/evaluate")
+        | ("POST", "/v1/systemone")
+        | ("POST", "/ai/run") => {
             if let Some(model) = extract_json_value(&request.body, "model") {
                 models.push(model);
             }
@@ -187,4 +191,75 @@ fn is_discovery_route(request: &HttpRequest) -> bool {
             | ("GET", "/version")
             | ("GET", "/is_sleeping")
     ) || (request.method == "GET" && request.uri.as_str().starts_with("/v1/models/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::shared::http::HttpRequest;
+
+    use super::{admin_only_proxy_route, request_models};
+
+    #[test]
+    fn systemone_evaluate_route_extracts_model() {
+        let req = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers: Default::default(),
+            body: br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec(),
+        };
+        let models = request_models(&req);
+        assert_eq!(models, vec!["systemone/diy-jev-0.1.0"]);
+    }
+
+    #[test]
+    fn systemone_evaluate_v1_route_extracts_model() {
+        let req = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/v1/evaluate".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers: Default::default(),
+            body: br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec(),
+        };
+        let models = request_models(&req);
+        assert_eq!(models, vec!["systemone/diy-jev-0.1.0"]);
+    }
+
+    #[test]
+    fn systemone_systemone_route_extracts_model() {
+        let req = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/v1/systemone".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers: Default::default(),
+            body: br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec(),
+        };
+        let models = request_models(&req);
+        assert_eq!(models, vec!["systemone/diy-jev-0.1.0"]);
+    }
+
+    #[test]
+    fn systemone_ai_run_route_extracts_model() {
+        let req = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/ai/run".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers: Default::default(),
+            body: br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec(),
+        };
+        let models = request_models(&req);
+        assert_eq!(models, vec!["systemone/diy-jev-0.1.0"]);
+    }
+
+    #[test]
+    fn systemone_routes_are_not_admin_only() {
+        let req = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/v1/evaluate".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers: Default::default(),
+            body: br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec(),
+        };
+        assert!(!admin_only_proxy_route(&req));
+    }
 }

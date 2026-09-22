@@ -72,7 +72,7 @@ fn handle_connection(state: Arc<AppState>, stream: TcpStream) -> io::Result<()> 
         };
 
         match request.method.as_str() {
-            "POLL" | "POLL-OLLAMA" | "POLL-VLLM" => handle_poll(
+            "POLL" | "POLL-OLLAMA" | "POLL-VLLM" | "POLL-SYSTEMONE" => handle_poll(
                 &state,
                 &worker_name,
                 connection_index,
@@ -123,7 +123,7 @@ fn authenticate_worker(
     let token = parts[0];
     let nonce = parts[1].to_string();
     let hive_version = parts[2].to_string();
-    let ollama_version = parts[3].to_string();
+    let backend_version = parts[3].to_string();
 
     let Some(record) = state.keys.verify(token, &[Role::Admin, Role::Worker]) else {
         log::warn("rejected worker authentication");
@@ -145,7 +145,7 @@ fn authenticate_worker(
             .or_insert_with(|| WorkerStatus {
                 name: worker_name.clone(),
                 hive_version: hive_version.clone(),
-                ollama_version: ollama_version.clone(),
+                backend_version: backend_version.clone(),
                 backend: WorkerBackend::Unknown,
                 tags: Vec::new(),
                 state: WorkerPhase::Authenticating,
@@ -164,7 +164,7 @@ fn authenticate_worker(
             ));
         }
         worker.hive_version = hive_version.clone();
-        worker.ollama_version = ollama_version.clone();
+        worker.backend_version = backend_version.clone();
         connection_index = worker.register_connection(nonce);
     }
 
@@ -186,7 +186,7 @@ fn authenticate_worker(
         None,
     );
     log::info(format!(
-        "worker auth accepted name={} role={} hive_version={} ollama_version={}",
+        "worker auth accepted name={} role={} hive_version={} backend_version={}",
         log::bold(&worker_name),
         record.role.as_str(),
         log::bold(parts[2]),
@@ -642,6 +642,7 @@ fn capture_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<Work
 fn sanitize_response_headers(headers: &[(String, String)], chunked: bool) -> Vec<(String, String)> {
     let mut sanitized = Vec::with_capacity(headers.len());
     let mut transfer_encoding = None;
+    let mut has_allow_origin = false;
 
     for (name, value) in headers {
         if chunked && name.eq_ignore_ascii_case("content-length") {
@@ -653,7 +654,14 @@ fn sanitize_response_headers(headers: &[(String, String)], chunked: bool) -> Vec
             }
             continue;
         }
+        if name.eq_ignore_ascii_case("access-control-allow-origin") {
+            has_allow_origin = true;
+        }
         sanitized.push((name.clone(), value.clone()));
+    }
+
+    if !has_allow_origin {
+        sanitized.push(("Access-Control-Allow-Origin".to_string(), "*".to_string()));
     }
 
     if chunked {

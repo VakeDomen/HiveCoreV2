@@ -2,6 +2,7 @@ use crate::app::AppState;
 use crate::servers::management::models::worker_command::WorkerCommandRequest;
 use crate::servers::proxy::models::client_task::{ClientTask, RequestContext};
 use crate::servers::proxy::models::response_target::ResponseTarget;
+use crate::servers::worker::models::worker_backend::WorkerBackend;
 use crate::shared::http::{HttpRequest, HttpResponse};
 use crate::shared::log;
 
@@ -13,6 +14,25 @@ pub fn post_worker_command(state: &AppState, request: &HttpRequest) -> HttpRespo
             return HttpResponse::new(400, "Bad Request", b"Invalid JSON body".to_vec());
         }
     };
+
+    // UPDATE commands are not supported for SystemOne workers (external-only backend).
+    if payload.command.is_update() {
+        if let Ok(guard) = state.workers.read() {
+            if let Some(worker) = guard.get(&payload.worker) {
+                if worker.backend == WorkerBackend::SystemOne {
+                    log::warn(format!(
+                        "rejected UPDATE command for SystemOne worker={}",
+                        payload.worker
+                    ));
+                    return HttpResponse::new(
+                        409,
+                        "Conflict",
+                        b"UPDATE is not supported for SystemOne workers".to_vec(),
+                    );
+                }
+            }
+        }
+    }
 
     let synthetic = HttpRequest {
         method: payload.command.hive_method().to_string(),

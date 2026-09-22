@@ -3,6 +3,7 @@ pub enum WorkerBackend {
     OllamaLegacy,
     Ollama,
     Vllm,
+    SystemOne,
     Unknown,
 }
 
@@ -12,6 +13,7 @@ impl WorkerBackend {
             "POLL" => Some(Self::OllamaLegacy),
             "POLL-OLLAMA" => Some(Self::Ollama),
             "POLL-VLLM" => Some(Self::Vllm),
+            "POLL-SYSTEMONE" => Some(Self::SystemOne),
             _ => None,
         }
     }
@@ -21,6 +23,7 @@ impl WorkerBackend {
             Self::OllamaLegacy => "ollama_legacy",
             Self::Ollama => "ollama",
             Self::Vllm => "vllm",
+            Self::SystemOne => "systemone",
             Self::Unknown => "unknown",
         }
     }
@@ -43,6 +46,10 @@ mod tests {
         assert_eq!(
             WorkerBackend::from_poll_method("POLL-VLLM"),
             Some(WorkerBackend::Vllm)
+        );
+        assert_eq!(
+            WorkerBackend::from_poll_method("POLL-SYSTEMONE"),
+            Some(WorkerBackend::SystemOne)
         );
         assert_eq!(WorkerBackend::from_poll_method("PING"), None);
     }

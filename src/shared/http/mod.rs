@@ -70,7 +70,11 @@ pub fn request_usage_model_name(request: &HttpRequest) -> Option<String> {
         | ("POST", "/v1/rerank")
         | ("POST", "/v2/rerank")
         | ("POST", "/tokenize")
-        | ("POST", "/detokenize") => extract_json_value(&request.body, "model"),
+        | ("POST", "/detokenize")
+        | ("POST", "/")
+        | ("POST", "/v1/evaluate")
+        | ("POST", "/v1/systemone")
+        | ("POST", "/ai/run") => extract_json_value(&request.body, "model"),
         _ => None,
     }
 }
@@ -145,7 +149,11 @@ pub fn request_model_name(request: &HttpRequest) -> Option<String> {
         | ("POST", "/detokenize")
         | ("POST", "/api/pull")
         | ("POST", "/api/push")
-        | ("DELETE", "/api/delete") => extract_json_value(&request.body, "model"),
+        | ("DELETE", "/api/delete")
+        | ("POST", "/")
+        | ("POST", "/v1/evaluate")
+        | ("POST", "/v1/systemone")
+        | ("POST", "/ai/run") => extract_json_value(&request.body, "model"),
         ("POST", "/api/show") => extract_json_value(&request.body, "model")
             .or_else(|| extract_json_value(&request.body, "name")),
         ("POST", "/api/copy") => extract_json_value(&request.body, "source"),
@@ -235,6 +243,15 @@ impl HttpResponse {
             headers: vec![
                 ("Content-Length".to_string(), body.len().to_string()),
                 ("Connection".to_string(), "close".to_string()),
+                ("Access-Control-Allow-Origin".to_string(), "*".to_string()),
+                (
+                    "Access-Control-Allow-Headers".to_string(),
+                    "Authorization, API-Key, Content-Type, Node".to_string(),
+                ),
+                (
+                    "Access-Control-Allow-Methods".to_string(),
+                    "GET, HEAD, POST, PATCH, DELETE, OPTIONS".to_string(),
+                ),
             ],
             body,
         }
@@ -562,5 +579,65 @@ mod tests {
         };
 
         assert!(!ensure_openai_stream_usage(&mut request));
+    }
+
+    #[test]
+    fn systemone_evaluate_usage_model_name_resolved() {
+        let request = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers: Default::default(),
+            body: br#"{"model":"systemone/diy-jev-0.1.0","state":"test","questions":{"q1":{"type":"noul","instructions":"test"}}}"#.to_vec(),
+        };
+        assert_eq!(
+            request_usage_model_name(&request).as_deref(),
+            Some("systemone/diy-jev-0.1.0")
+        );
+    }
+
+    #[test]
+    fn systemone_evaluate_v1_usage_model_name_resolved() {
+        let request = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/v1/evaluate".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers: Default::default(),
+            body: br#"{"model":"systemone/diy-jev-0.1.0","state":"test","questions":{"q1":{"type":"noul","instructions":"test"}}}"#.to_vec(),
+        };
+        assert_eq!(
+            request_usage_model_name(&request).as_deref(),
+            Some("systemone/diy-jev-0.1.0")
+        );
+    }
+
+    #[test]
+    fn systemone_systemone_usage_model_name_resolved() {
+        let request = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/v1/systemone".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers: Default::default(),
+            body: br#"{"model":"systemone/diy-jev-0.1.0","state":"test","questions":{"q1":{"type":"noul","instructions":"test"}}}"#.to_vec(),
+        };
+        assert_eq!(
+            request_usage_model_name(&request).as_deref(),
+            Some("systemone/diy-jev-0.1.0")
+        );
+    }
+
+    #[test]
+    fn systemone_ai_run_usage_model_name_resolved() {
+        let request = HttpRequest {
+            method: "POST".to_string(),
+            uri: "/ai/run".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            headers: Default::default(),
+            body: br#"{"model":"systemone/diy-jev-0.1.0","state":"test","questions":{"q1":{"type":"noul","instructions":"test"}}}"#.to_vec(),
+        };
+        assert_eq!(
+            request_usage_model_name(&request).as_deref(),
+            Some("systemone/diy-jev-0.1.0")
+        );
     }
 }

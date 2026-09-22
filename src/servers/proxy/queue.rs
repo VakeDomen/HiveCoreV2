@@ -295,6 +295,7 @@ fn next_compatible_key(
         ModelRouteKind::OpenAiCompatible,
         ModelRouteKind::OllamaNative,
         ModelRouteKind::VllmSpecific,
+        ModelRouteKind::SystemOne,
     ]
     .into_iter()
     .find_map(|kind| {
@@ -500,5 +501,36 @@ mod tests {
 
         assert_eq!(task.request.uri, "/rerank");
         assert!(queue.snapshot().node_queue.is_empty());
+    }
+
+    #[test]
+    fn systemone_work_is_not_dequeued_by_ollama_workers() {
+        let queue = RequestQueue::default();
+        queue
+            .enqueue_model(
+                "systemone/diy-jev-0.1.0".to_string(),
+                ModelRouteKind::SystemOne,
+                task("/"),
+            )
+            .expect("enqueue systemone");
+
+        assert!(
+            queue
+                .dequeue_for_worker(
+                    "ollama",
+                    WorkerBackend::Ollama,
+                    &["systemone/diy-jev-0.1.0".to_string()]
+                )
+                .is_none()
+        );
+        assert!(
+            queue
+                .dequeue_for_worker(
+                    "systemone",
+                    WorkerBackend::SystemOne,
+                    &["systemone/diy-jev-0.1.0".to_string()]
+                )
+                .is_some()
+        );
     }
 }

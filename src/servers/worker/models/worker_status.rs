@@ -19,7 +19,7 @@ pub struct WorkerConnectionStatus {
 pub struct WorkerStatus {
     pub name: String,
     pub hive_version: String,
-    pub ollama_version: String,
+    pub backend_version: String,
     pub backend: WorkerBackend,
     pub tags: Vec<String>,
     pub state: WorkerPhase,

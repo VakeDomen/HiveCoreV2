@@ -49,6 +49,11 @@ enum ProxyEndpoint {
     // LoadModel { model: String },
     // UnloadModel { model: String },
     Health,
+    SystemOneEvaluate,
+    SystemOneEvaluateV1,
+    SystemOneSystemOne,
+    SystemOneCloudflareAiRun,
+    SystemOneModel,
     Unknown,
 }
 
@@ -99,6 +104,20 @@ pub fn plan_request(
             reason: "Bad Request",
             message: "this vLLM control route requires a Node header",
         },
+
+        ProxyEndpoint::SystemOneEvaluate
+        | ProxyEndpoint::SystemOneEvaluateV1
+        | ProxyEndpoint::SystemOneSystemOne
+        | ProxyEndpoint::SystemOneCloudflareAiRun => {
+            route_systemone_eval_request(state, request)
+        }
+        ProxyEndpoint::SystemOneModel => {
+            let workers = connected_workers_by_backend(state, WorkerBackendFilter::SystemOne);
+            if workers.is_empty() {
+                return no_workers_available();
+            }
+            RoutePlan::QueueByNode(workers[0].clone())
+        }
 
         // ProxyEndpoint::LoadModel { model } => route_load_model_request(state, visible_key, &model),
         // ProxyEndpoint::UnloadModel { model } => {
@@ -168,6 +187,13 @@ fn classify_endpoint(request: &HttpRequest) -> ProxyEndpoint {
         | ("POST", "/stop_profile")
         | ("POST", "/sleep")
         | ("POST", "/wake_up") => return ProxyEndpoint::VllmTargetedOnly,
+
+        // SystemOne evaluation routes
+        ("POST", "/") => return ProxyEndpoint::SystemOneEvaluate,
+        ("POST", "/v1/evaluate") => return ProxyEndpoint::SystemOneEvaluateV1,
+        ("POST", "/v1/systemone") => return ProxyEndpoint::SystemOneSystemOne,
+        ("POST", "/ai/run") => return ProxyEndpoint::SystemOneCloudflareAiRun,
+        ("GET", "/model") => return ProxyEndpoint::SystemOneModel,
         _ => {}
     }
 
@@ -338,6 +364,16 @@ fn local_openai_model_response(
         "created": 0,
         "owned_by": "ollama"
     })))
+}
+
+fn route_systemone_eval_request(state: &AppState, request: &HttpRequest) -> RoutePlan {
+    match json_string_field(&request.body, "model") {
+        Some(model) => RoutePlan::QueueByModel {
+            model,
+            kind: ModelRouteKind::SystemOne,
+        },
+        None => route_to_any_backend(state, WorkerBackendFilter::SystemOne),
+    }
 }
 
 fn route_by_required_model(request: &HttpRequest, kind: ModelRouteKind) -> RoutePlan {
@@ -543,6 +579,7 @@ enum WorkerBackendFilter {
     Any,
     Ollama,
     Vllm,
+    SystemOne,
 }
 
 impl WorkerBackendFilter {
@@ -551,6 +588,7 @@ impl WorkerBackendFilter {
             Self::Any => true,
             Self::Ollama => matches!(backend, WorkerBackend::OllamaLegacy | WorkerBackend::Ollama),
             Self::Vllm => matches!(backend, WorkerBackend::Vllm),
+            Self::SystemOne => matches!(backend, WorkerBackend::SystemOne),
         }
     }
 }
@@ -755,7 +793,7 @@ mod tests {
         WorkerStatus {
             name: name.to_string(),
             hive_version: "0.1.0".to_string(),
-            ollama_version: "0.1.0".to_string(),
+            backend_version: "0.1.0".to_string(),
             backend: WorkerBackend::OllamaLegacy,
             tags: tags.into_iter().map(str::to_string).collect(),
             state: WorkerPhase::Polling,
@@ -1030,6 +1068,126 @@ mod tests {
                 assert_eq!(models[0]["name"], "bge-m3:latest");
             }
             _ => panic!("expected local aggregate"),
+        }
+        cleanup(&db);
+        Ok(())
+    }
+
+    #[test]
+    fn systemone_evaluate_routes_as_systemone_model_work() -> io::Result<()> {
+        let (state, db) = test_state("systemone_evaluate")?;
+        let req = request(
+            "POST",
+            "/",
+            br#"{"model":"systemone/diy-jev-0.1.0"}"#,
+        );
+        match plan_request(&state, &req, None) {
+            RoutePlan::QueueByModel { model, kind } => {
+                assert_eq!(model, "systemone/diy-jev-0.1.0");
+                assert_eq!(kind, ModelRouteKind::SystemOne);
+            }
+            _ => panic!("expected model route"),
+        }
+        cleanup(&db);
+        Ok(())
+    }
+
+    #[test]
+    fn systemone_evaluate_v1_routes_as_systemone_model_work() -> io::Result<()> {
+        let (state, db) = test_state("systemone_evaluate_v1")?;
+        let req = request(
+            "POST",
+            "/v1/evaluate",
+            br#"{"model":"systemone/diy-jev-0.1.0"}"#,
+        );
+        match plan_request(&state, &req, None) {
+            RoutePlan::QueueByModel { model, kind } => {
+                assert_eq!(model, "systemone/diy-jev-0.1.0");
+                assert_eq!(kind, ModelRouteKind::SystemOne);
+            }
+            _ => panic!("expected model route"),
+        }
+        cleanup(&db);
+        Ok(())
+    }
+
+    #[test]
+    fn systemone_systemone_route_classifies_correctly() -> io::Result<()> {
+        let (state, db) = test_state("systemone_systemone")?;
+        let req = request(
+            "POST",
+            "/v1/systemone",
+            br#"{"model":"systemone/diy-jev-0.1.0"}"#,
+        );
+        match plan_request(&state, &req, None) {
+            RoutePlan::QueueByModel { model, kind } => {
+                assert_eq!(model, "systemone/diy-jev-0.1.0");
+                assert_eq!(kind, ModelRouteKind::SystemOne);
+            }
+            _ => panic!("expected model route"),
+        }
+        cleanup(&db);
+        Ok(())
+    }
+
+    #[test]
+    fn systemone_ai_run_routes_as_systemone_model_work() -> io::Result<()> {
+        let (state, db) = test_state("systemone_ai_run")?;
+        let req = request(
+            "POST",
+            "/ai/run",
+            br#"{"model":"systemone/diy-jev-0.1.0"}"#,
+        );
+        match plan_request(&state, &req, None) {
+            RoutePlan::QueueByModel { model, kind } => {
+                assert_eq!(model, "systemone/diy-jev-0.1.0");
+                assert_eq!(kind, ModelRouteKind::SystemOne);
+            }
+            _ => panic!("expected model route"),
+        }
+        cleanup(&db);
+        Ok(())
+    }
+
+    #[test]
+    fn systemone_model_routes_to_systemone_worker() -> io::Result<()> {
+        let (mut state, db) = test_state("systemone_model")?;
+        let mut workers = HashMap::new();
+        workers.insert(
+            "s1-worker".to_string(),
+            WorkerStatus {
+                backend: WorkerBackend::SystemOne,
+                tags: vec!["systemone/diy-jev-0.1.0".to_string()],
+                ..worker_status("s1-worker", vec!["systemone/diy-jev-0.1.0"])
+            },
+        );
+        state.workers = RwLock::new(workers);
+        let req = request("GET", "/model", b"");
+        match plan_request(&state, &req, None) {
+            RoutePlan::QueueByNode(worker) => {
+                assert_eq!(worker, "s1-worker");
+            }
+            _ => panic!("expected node route"),
+        }
+        cleanup(&db);
+        Ok(())
+    }
+
+    #[test]
+    fn systemone_model_returns_503_when_no_systemone_worker() -> io::Result<()> {
+        let (mut state, db) = test_state("systemone_model_empty")?;
+        let mut workers = HashMap::new();
+        workers.insert(
+            "ollama-worker".to_string(),
+            worker_status("ollama-worker", vec!["llama3"]),
+        );
+        state.workers = RwLock::new(workers);
+        let req = request("GET", "/model", b"");
+        match plan_request(&state, &req, None) {
+            RoutePlan::Reject { status, .. } => {
+                assert_eq!(status, 503);
+            }
+            _ => panic!("expected 503 rejection"),
         }
         cleanup(&db);
         Ok(())

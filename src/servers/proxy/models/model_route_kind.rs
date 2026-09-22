@@ -5,6 +5,7 @@ pub enum ModelRouteKind {
     OllamaNative,
     OpenAiCompatible,
     VllmSpecific,
+    SystemOne,
 }
 
 impl ModelRouteKind {
@@ -13,6 +14,7 @@ impl ModelRouteKind {
             Self::OllamaNative => "ollama",
             Self::OpenAiCompatible => "openai",
             Self::VllmSpecific => "vllm",
+            Self::SystemOne => "systemone",
         }
     }
 
@@ -23,6 +25,7 @@ impl ModelRouteKind {
             }
             Self::OpenAiCompatible => true,
             Self::VllmSpecific => matches!(backend, WorkerBackend::Vllm),
+            Self::SystemOne => matches!(backend, WorkerBackend::SystemOne),
         }
     }
 }

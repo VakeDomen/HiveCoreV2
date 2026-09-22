@@ -166,7 +166,7 @@ mod tests {
         WorkerStatus {
             name: name.to_string(),
             hive_version: "0.1.0".to_string(),
-            ollama_version: "0.1.0".to_string(),
+            backend_version: "0.1.0".to_string(),
             backend: WorkerBackend::OllamaLegacy,
             tags: vec!["llama3".to_string()],
             state: phase,

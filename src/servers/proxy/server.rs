@@ -49,6 +49,10 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         }
     };
 
+    if request.method == "OPTIONS" {
+        return HttpResponse::new(204, "No Content", Vec::new()).write_to(&mut stream);
+    }
+
     if let Err(err) = authorize_request(&state, &request) {
         let (status, reason, body): (u16, &str, Vec<u8>) = match err {
             AuthError::RateLimited(denial) => {
@@ -245,6 +249,8 @@ fn enqueue_node(
 
     Ok(())
 }
+
+
 
 #[cfg(test)]
 mod tests {
