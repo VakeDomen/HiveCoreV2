@@ -14,7 +14,9 @@ const publicTypes = new Map([
 const env = loadEnv(path.join(root, ".env"));
 const config = {
   proxyEndpoint: stripTrailingSlash(
-    env.HIVECORE_PROXY_ENDPOINT || env.HIVECORE_ENDPOINT || "http://127.0.0.1:6666",
+    env.HIVECORE_PROXY_ENDPOINT ||
+      env.HIVECORE_ENDPOINT ||
+      "https://hivecore.famnit.upr.si",
   ),
   managementEndpoint: stripTrailingSlash(
     env.HIVECORE_MANAGEMENT_ENDPOINT || "http://127.0.0.1:6668",

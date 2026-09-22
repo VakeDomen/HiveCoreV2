@@ -20,6 +20,9 @@ const state = {
   },
   refreshTimer: null,
   refreshIntervalMs: 0,
+  disconnected: false,
+  sidebarCollapsed: false,
+  isRunning: false,
   data: {
     keys: [],
     workers: {},
@@ -115,7 +118,12 @@ document.addEventListener("DOMContentLoaded", init);
 async function init() {
   bindEvents();
   renderApiSurface();
-  state.config = await requestJson("/config.json", { noAuth: true });
+  try {
+    state.config = await requestJson("/config.json");
+  } catch {
+    // If config fetch fails, still allow manual login
+    state.config = { proxyEndpoint: "", managementEndpoint: "", key: "" };
+  }
   $("#proxy-endpoint").textContent = state.config.proxyEndpoint;
   $("#management-endpoint").textContent = state.config.managementEndpoint;
   $("#login-proxy-endpoint").textContent = state.config.proxyEndpoint;
@@ -130,23 +138,17 @@ async function init() {
 function bindEvents() {
   $("#login-form").addEventListener("submit", async (event) => {
     event.preventDefault();
+    const btn = $("#login-button");
+    btn.disabled = true;
+    btn.textContent = "Connecting...";
     state.key = $("#key-input").value.trim();
     await connect();
+    btn.disabled = false;
+    btn.textContent = "Connect";
   });
 
   $("#logout-button").addEventListener("click", () => {
-    if (state.refreshTimer) {
-      clearInterval(state.refreshTimer);
-      state.refreshTimer = null;
-    }
-    $("#dashboard-shell").classList.add("hidden");
-    $("#login-screen").classList.remove("hidden");
-    state.role = "disconnected";
-    state.admin = false;
-    state.managementRead = false;
-    state.managementWrite = false;
-    renderRole();
-    setLoginStatus("Enter a key to connect.");
+    disconnectSession();
   });
 
   $("#toggle-key").addEventListener("click", () => {
@@ -155,6 +157,20 @@ function bindEvents() {
   });
 
   $("#refresh-button").addEventListener("click", () => refreshCurrentView());
+
+  // Sidebar toggle
+  $("#sidebar-toggle").addEventListener("click", () => {
+    state.sidebarCollapsed = !state.sidebarCollapsed;
+    $("#sidebar").classList.toggle("collapsed", state.sidebarCollapsed);
+  });
+
+  // Reconnect button
+  $("#reconnect-button").addEventListener("click", async () => {
+    $("#disconnect-banner").classList.add("hidden");
+    state.disconnected = false;
+    await connect();
+  });
+
   $("#refresh-interval").addEventListener("change", () => {
     state.refreshIntervalMs = Number($("#refresh-interval").value);
     configureAutoRefresh();
@@ -162,6 +178,25 @@ function bindEvents() {
 
   $$(".nav-button").forEach((button) => {
     button.addEventListener("click", () => showView(button.dataset.view));
+  });
+
+  // Copy response
+  $("#copy-response-button").addEventListener("click", () => {
+    const text = $("#prompt-output").textContent;
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(() => {
+      toast("Response copied to clipboard");
+    }).catch(() => {
+      fallbackCopy(text);
+      toast("Response copied to clipboard");
+    });
+  });
+
+  // Clear response
+  $("#clear-response-button").addEventListener("click", () => {
+    setPromptOutput("", true);
+    $("#copy-response-button").style.display = "none";
+    $("#clear-response-button").style.display = "none";
   });
 
   document.addEventListener("click", async (event) => {
@@ -190,6 +225,15 @@ function bindEvents() {
         actionTarget.dataset.model,
         actionTarget.dataset.defaultMode,
       );
+    }
+    if (action === "api-endpoint") {
+      return openApiPlay(actionTarget.dataset.method, actionTarget.dataset.path, actionTarget.dataset.section);
+    }
+    if (action === "api-play") {
+      return openApiPlay(actionTarget.dataset.method, actionTarget.dataset.path, actionTarget.dataset.section);
+    }
+    if (action === "api-play-close") {
+      return closeApiPlay();
     }
   });
 
@@ -230,12 +274,65 @@ function bindEvents() {
       renderModelConsole();
     }
   });
+  $("#model-console-worker").addEventListener("change", () => {
+    if (state.selectedModel) {
+      state.selectedModel.worker = $("#model-console-worker").value;
+    }
+  });
   $$("#key-role-tabs .tab").forEach((button) => {
     button.addEventListener("click", () => {
       state.keyRoleFilter = button.dataset.roleFilter;
       renderKeys();
     });
   });
+
+  // Keyboard shortcuts
+  document.addEventListener("keydown", (event) => {
+    // Don't trigger shortcuts when typing in inputs
+    const tag = event.target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+      // Ctrl+Enter still works in textarea
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        const form = event.target.closest("form");
+        if (form) form.requestSubmit();
+      }
+      return;
+    }
+
+    // Navigation: 1-6
+    const viewIndex = parseInt(event.key);
+    if (viewIndex >= 1 && viewIndex <= 6) {
+      const views = ["overview", "workers", "models", "keys", "stats", "api"];
+      const nav = document.querySelector(`.nav-button[data-view="${views[viewIndex - 1]}"]`);
+      if (nav && !nav.classList.contains("hidden")) {
+        showView(views[viewIndex - 1]);
+      }
+      return;
+    }
+
+    // R for refresh
+    if (event.key === "r" || event.key === "R") {
+      refreshCurrentView();
+    }
+  });
+}
+
+function disconnectSession() {
+  if (state.refreshTimer) {
+    clearInterval(state.refreshTimer);
+    state.refreshTimer = null;
+  }
+  $("#dashboard-shell").classList.add("hidden");
+  $("#login-screen").classList.remove("hidden");
+  state.role = "disconnected";
+  state.admin = false;
+  state.managementRead = false;
+  state.managementWrite = false;
+  state.disconnected = false;
+  state.isRunning = false;
+  $("#disconnect-banner").classList.add("hidden");
+  renderRole();
+  setLoginStatus("Enter a key to connect.");
 }
 
 async function connect() {
@@ -243,6 +340,7 @@ async function connect() {
     setLoginStatus("Enter a Hive key.", true);
     return;
   }
+  showSkeleton(true);
   setLoginStatus("Checking key...");
   resetData();
 
@@ -257,7 +355,9 @@ async function connect() {
     state.managementRead = true;
     state.managementWrite = canSeeTokens;
     state.role = canSeeTokens ? "admin" : "analytics";
-    state.refreshIntervalMs = Number($("#refresh-interval").value || 5000);
+    // Admin: 5s auto-refresh, non-admin: 0
+    state.refreshIntervalMs = canSeeTokens ? 5000 : 0;
+    $("#refresh-interval").value = String(state.refreshIntervalMs);
     state.data.keys = adminProbe.body;
     setStatus(canSeeTokens ? "Connected as admin." : "Connected as analytics.");
     await Promise.all([loadWorkers(), loadQueue(), loadOllamaTags(), loadOpenAiModels(), loadMyKey()]);
@@ -272,6 +372,7 @@ async function connect() {
       state.managementWrite = false;
       setLoginStatus("Key was rejected by HiveCore.", true);
       renderRole();
+      showSkeleton(false);
       return;
     }
     state.admin = false;
@@ -289,7 +390,16 @@ async function connect() {
   renderAll();
   $("#login-screen").classList.add("hidden");
   $("#dashboard-shell").classList.remove("hidden");
+  showSkeleton(false);
   configureAutoRefresh();
+}
+
+function showSkeleton(visible) {
+  $("#loading-skeleton").classList.toggle("hidden", !visible);
+  // Hide views while skeleton is shown
+  $$(".view").forEach((view) => {
+    if (visible) view.classList.remove("active");
+  });
 }
 
 function resetData() {
@@ -356,10 +466,22 @@ function configureAutoRefresh() {
   }
   if (!state.managementRead || !state.refreshIntervalMs) return;
   state.refreshTimer = setInterval(() => {
+    if (state.disconnected) return;
     refreshCurrentView({ soft: true }).catch((error) => {
-      setStatus(error.message, true);
+      handleFetchError(error);
     });
   }, state.refreshIntervalMs);
+}
+
+function handleFetchError(error) {
+  if (state.disconnected) return;
+  state.disconnected = true;
+  if (state.refreshTimer) {
+    clearInterval(state.refreshTimer);
+    state.refreshTimer = null;
+  }
+  $("#disconnect-banner").classList.remove("hidden");
+  toast("Connection lost: " + (error.message || error), true);
 }
 
 function showView(name) {
@@ -377,7 +499,7 @@ function currentView() {
 }
 
 async function refreshCurrentView(options = {}) {
-  if (!state.key) return;
+  if (!state.key || state.disconnected) return;
   const view = currentView();
   if (!options.soft) setStatus("Refreshing...");
   if (view === "overview") {
@@ -438,6 +560,7 @@ async function loadWorkers() {
   state.data.tags = tags.body;
   state.data.versions = versions.body;
   renderWorkers();
+  renderModelWorkerSelect();
 }
 
 async function loadQueue() {
@@ -762,7 +885,6 @@ function renderMyKey() {
     html += `<article class="usage-stat stat-gray"><span>Concurrent</span><strong>0/−</strong></article>`;
   }
 
-  // Build a map of window data from the snapshot
   const winMap = {};
   if (snapshot && snapshot.windows) {
     for (const win of snapshot.windows) {
@@ -770,7 +892,6 @@ function renderMyKey() {
     }
   }
 
-  // Always show tier windows, using snapshot data or 0
   const windowNames = [
     { key: "min", limitField: "requests_per_minute", label: "per min" },
     { key: "hour", limitField: "requests_per_hour", label: "per hour" },
@@ -794,7 +915,6 @@ function renderMyKey() {
 
   html += `</div>`;
 
-  // Today's usage summary
   if (myUsage && myUsage.rows && myUsage.rows.length) {
     const rows = myUsage.rows;
     let totalReqs = 0, totalErrors = 0, totalPrompt = 0, totalCompletion = 0;
@@ -942,7 +1062,46 @@ function overviewWorkerCard(name) {
 
 function renderQueue() {
   if (!state.managementRead) return;
-  $("#queue-json").textContent = pretty(state.data.queue || {});
+  const root = $("#queue-view");
+  const queue = state.data.queue || {};
+  const modelQueue = queue.model_queue || {};
+  const nodeQueue = queue.node_queue || {};
+  const modelEntries = Object.entries(modelQueue).filter(([, count]) => Number(count) > 0);
+  const nodeEntries = Object.entries(nodeQueue).filter(([, count]) => Number(count) > 0);
+
+  if (!modelEntries.length && !nodeEntries.length) {
+    root.innerHTML = `<div class="queue-empty">All queues idle</div>`;
+    return;
+  }
+
+  let html = "";
+  if (modelEntries.length) {
+    html += `<div class="queue-card">
+      <h4>Model Queue</h4>
+      <div class="queue-rows">
+        ${modelEntries.map(([name, count]) => `
+          <div class="queue-row">
+            <strong>${escapeHtml(name)}</strong>
+            <span>${count} queued</span>
+          </div>
+        `).join("")}
+      </div>
+    </div>`;
+  }
+  if (nodeEntries.length) {
+    html += `<div class="queue-card">
+      <h4>Node Queue</h4>
+      <div class="queue-rows">
+        ${nodeEntries.map(([name, count]) => `
+          <div class="queue-row">
+            <strong>${escapeHtml(name)}</strong>
+            <span>${count} queued</span>
+          </div>
+        `).join("")}
+      </div>
+    </div>`;
+  }
+  root.innerHTML = html;
   renderOverview();
 }
 
@@ -1402,7 +1561,7 @@ function shortDate(value) {
 async function createKey(event) {
   event.preventDefault();
   const name = $("#new-key-name").value.trim();
-  if (!name) return setStatus("Key name is required.", true);
+  if (!name) return toast("Key name is required.", true);
   const payload = {
     name,
     role: $("#new-key-role").value,
@@ -1417,7 +1576,7 @@ async function createKey(event) {
     expected: [201, 400, 409, 500],
   });
   if (response.status !== 201)
-    return setStatus(`Create failed: ${response.status}`, true);
+    return toast(`Create failed: ${response.status}`, true);
   $("#created-token").innerHTML =
     `Created token: <code>${escapeHtml(response.body.token)}</code>`;
   $("#create-key-form").reset();
@@ -1428,10 +1587,10 @@ async function createKey(event) {
 async function copyToken(token) {
   try {
     await navigator.clipboard.writeText(token);
-    setStatus("Token copied.");
+    toast("Token copied.");
   } catch {
     fallbackCopy(token);
-    setStatus("Token copied.");
+    toast("Token copied.");
   }
 }
 
@@ -1457,8 +1616,8 @@ async function saveKey(id) {
     expected: [200, 400, 404, 409, 500],
   });
   if (response.status !== 200)
-    return setStatus(`Save failed: ${response.status}`, true);
-  setStatus("Key updated.");
+    return toast(`Save failed: ${response.status}`, true);
+  toast("Key updated.");
   await loadKeys();
 }
 
@@ -1470,8 +1629,8 @@ async function deleteKey(id) {
     expected: [204, 404, 500],
   });
   if (response.status !== 204)
-    return setStatus(`Delete failed: ${response.status}`, true);
-  setStatus("Key deleted.");
+    return toast(`Delete failed: ${response.status}`, true);
+  toast("Key deleted.");
   await loadKeys();
 }
 
@@ -1479,18 +1638,401 @@ async function sendWorkerCommand(event) {
   event.preventDefault();
   const worker = $("#command-worker").value.trim();
   const command = $("#command-name").value;
-  if (!worker) return setStatus("Worker name is required.", true);
+  if (!worker) return toast("Worker name is required.", true);
+
+  // Confirmation for destructive commands
+  if (command === "SHUTDOWN" || command === "REBOOT") {
+    if (!confirm(`Send "${command}" to worker "${worker}"? This will ${command === "SHUTDOWN" ? "shut down" : "reboot"} the worker.`)) {
+      return;
+    }
+  }
+
   const response = await api("management", "/worker/command", {
     method: "POST",
     body: { worker, command },
     expected: [202, 400, 500],
   });
-  setStatus(
-    response.status === 202
-      ? "Worker command queued."
-      : `Command failed: ${response.status}`,
-    response.status !== 202,
-  );
+  if (response.status === 202) {
+    toast(`Worker command "${command}" sent to "${worker}".`);
+  } else {
+    toast(`Command failed: ${response.status}`, true);
+  }
+}
+
+// ── API Play (inline request/response) ──
+// Per-endpoint field schemas: what inputs to show the user
+const apiFieldSchemas = {
+  // ── Ollama ──
+  "/api/generate": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. llama3.2", default: "llama3.2" },
+    { key: "prompt", label: "Prompt", type: "text", placeholder: "e.g. what is the meaning of life?", default: "what is the meaning of life?" },
+    { key: "stream", label: "Stream", type: "checkbox", default: false, skipBody: false },
+  ],
+  "/api/chat": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. llama3.2", default: "llama3.2" },
+    { key: "messages[0].role", label: "Role", type: "text", placeholder: "user / system / assistant", default: "user", skipBodyBuild: "hide" },
+    { key: "messages[0].content", label: "Message", type: "text", placeholder: "e.g. what is the meaning of life?", default: "what is the meaning of life?" },
+    { key: "stream", label: "Stream", type: "checkbox", default: false, skipBody: false },
+  ],
+  "/api/embed": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. all-minilm", default: "all-minilm" },
+    { key: "input", label: "Input text", type: "text", placeholder: "e.g. Why is the sky blue?", default: "Why is the sky blue?" },
+  ],
+  "/api/embeddings": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. all-minilm", default: "all-minilm" },
+    { key: "prompt", label: "Prompt", type: "text", placeholder: "e.g. Here is an article...", default: "Here is an article about llamas..." },
+  ],
+  "/api/tags": [],
+  "/api/ps": [],
+  "/api/show": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. llama3.2", default: "llama3.2" },
+  ],
+  "/api/version": [],
+  "/api/create": [
+    { key: "model", label: "New model name", type: "text", placeholder: "e.g. mario", default: "mario" },
+    { key: "from", label: "Base model", type: "text", placeholder: "e.g. llama3.2", default: "llama3.2" },
+    { key: "system", label: "System prompt", type: "text", placeholder: "e.g. You are Mario...", default: "You are Mario from Super Mario Bros." },
+  ],
+  "/api/copy": [
+    { key: "source", label: "Source model", type: "text", placeholder: "e.g. llama3.2", default: "llama3.2" },
+    { key: "destination", label: "Destination name", type: "text", placeholder: "e.g. llama3-backup", default: "llama3-backup" },
+  ],
+  "/api/pull": [
+    { key: "model", label: "Model to pull", type: "text", placeholder: "e.g. llama3.2", default: "llama3.2" },
+  ],
+  "/api/push": [
+    { key: "model", label: "Model to push", type: "text", placeholder: "e.g. my-namespace/my-model:tag", default: "mattw/pygmalion:latest" },
+  ],
+  "/api/delete": [
+    { key: "model", label: "Model to delete", type: "text", placeholder: "e.g. llama3:13b", default: "llama3:13b" },
+  ],
+  // ── OpenAI / vLLM ──
+  "/v1/chat/completions": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. gpt-4o-mini", default: "gpt-4o-mini" },
+    { key: "messages[0].role", label: "Role", type: "text", placeholder: "user / system / assistant", default: "user", skipBodyBuild: "hide" },
+    { key: "messages[0].content", label: "Message", type: "text", placeholder: "e.g. what is the meaning of life?", default: "what is the meaning of life?" },
+    { key: "stream", label: "Stream", type: "checkbox", default: false, skipBody: false },
+    { key: "max_tokens", label: "Max tokens", type: "text", placeholder: "optional", default: "" },
+  ],
+  "/v1/chat/completions/batch": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. gpt-4o-mini", default: "gpt-4o-mini" },
+    { key: "messages[0].role", label: "Role", type: "text", placeholder: "user", default: "user", skipBodyBuild: "hide" },
+    { key: "messages[0].content", label: "Message", type: "text", placeholder: "e.g. what is the meaning of life?", default: "what is the meaning of life?" },
+  ],
+  "/v1/completions": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. gpt-3.5-turbo-instruct", default: "gpt-3.5-turbo-instruct" },
+    { key: "prompt", label: "Prompt", type: "text", placeholder: "e.g. Once upon a time", default: "Once upon a time" },
+    { key: "stream", label: "Stream", type: "checkbox", default: false, skipBody: false },
+    { key: "max_tokens", label: "Max tokens", type: "text", placeholder: "optional", default: "" },
+  ],
+  "/v1/responses": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. gpt-4o-mini", default: "gpt-4o-mini" },
+    { key: "input", label: "Input", type: "text", placeholder: "e.g. what is the meaning of life?", default: "what is the meaning of life?" },
+  ],
+  "/v1/responses/:response_id": [],
+  "/v1/responses/:response_id/cancel": [],
+  "/v1/embeddings": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. text-embedding-3-small", default: "text-embedding-3-small" },
+    { key: "input", label: "Input", type: "text", placeholder: "e.g. The quick brown fox", default: "The quick brown fox" },
+  ],
+  "/v1/models": [],
+  "/v1/models/:model": [],
+  "/v2/embed": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. model-name", default: "embed-model" },
+    { key: "input", label: "Input", type: "text", placeholder: "e.g. hello world", default: "hello world" },
+  ],
+  "/score": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. model-name", default: "score-model" },
+    { key: "text", label: "Text", type: "text", placeholder: "e.g. example text", default: "example text" },
+  ],
+  "/v1/score": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. model-name", default: "score-model" },
+    { key: "text", label: "Text", type: "text", placeholder: "e.g. example text", default: "example text" },
+  ],
+  "/rerank": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. rerank-model", default: "rerank-model" },
+    { key: "query", label: "Query", type: "text", placeholder: "e.g. What is Python?", default: "What is Python?" },
+    { key: "documents", label: "Documents (comma-sep)", type: "text", placeholder: "e.g. Python is a language, Java is a language", default: "Python is a language, Java is a language" },
+  ],
+  "/v1/rerank": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. rerank-model", default: "rerank-model" },
+    { key: "query", label: "Query", type: "text", placeholder: "e.g. What is Python?", default: "What is Python?" },
+    { key: "documents", label: "Documents (comma-sep)", type: "text", placeholder: "e.g. Python is a language, Java is a language", default: "Python is a language, Java is a language" },
+  ],
+  "/v2/rerank": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. rerank-model", default: "rerank-model" },
+    { key: "query", label: "Query", type: "text", placeholder: "e.g. What is Python?", default: "What is Python?" },
+    { key: "documents", label: "Documents (comma-sep)", type: "text", placeholder: "e.g. Python is a language, Java is a language", default: "Python is a language, Java is a language" },
+  ],
+  "/tokenize": [
+    { key: "content", label: "Content", type: "text", placeholder: "e.g. Hello world", default: "Hello world" },
+    { key: "model", label: "Model", type: "text", placeholder: "optional", default: "" },
+  ],
+  "/detokenize": [
+    { key: "tokens", label: "Tokens", type: "text", placeholder: "e.g. [1,2,3]", default: "[1,2,3]" },
+    { key: "model", label: "Model", type: "text", placeholder: "optional", default: "" },
+  ],
+  "/health": [],
+  "/version": [],
+  "/tokenizer_info": [],
+  "/is_sleeping": [],
+  "/load": [
+    { key: "model", label: "Model", type: "text", placeholder: "e.g. model-name", default: "model-name" },
+  ],
+  "/metrics": [],
+  "/v1/load_lora_adapter": [
+    { key: "lora_name", label: "LoRA name", type: "text", placeholder: "e.g. my-lora", default: "my-lora" },
+    { key: "lora_path", label: "LoRA path", type: "text", placeholder: "e.g. /path/to/lora.safetensors", default: "/path/to/lora.safetensors" },
+  ],
+  "/v1/unload_lora_adapter": [
+    { key: "lora_name", label: "LoRA name", type: "text", placeholder: "e.g. my-lora", default: "my-lora" },
+  ],
+  "/v1/lora_adapters": [],
+  "/start_profile": [],
+  "/stop_profile": [],
+  "/sleep": [],
+  "/wake_up": [],
+  // ── Management ──
+  "/queue": [],
+  "/worker/status": [],
+  "/worker/connections": [],
+  "/worker/pings": [],
+  "/worker/tags": [],
+  "/worker/versions": [],
+  "/usage?from=YYYY-MM-DD&to=YYYY-MM-DD": [],
+  "/key": [],
+  "/key/me": [],
+  "/key/me/limits": [],
+  // Management mutations (POST/PATCH/DELETE)
+  "/key#POST": [
+    { key: "name", label: "Key name", type: "text", placeholder: "e.g. my-app-key", default: "my-app-key" },
+    { key: "capture", label: "Capture", type: "checkbox", default: true, skipBody: false },
+    { key: "rate_limit_tier", label: "Rate limit tier", type: "text", placeholder: "0 = default", default: "0" },
+  ],
+  "/key#PATCH": [
+    { key: "id", label: "Key ID", type: "text", placeholder: "e.g. 1", default: "1" },
+    { key: "name", label: "Key name", type: "text", placeholder: "optional", default: "" },
+    { key: "capture", label: "Capture", type: "checkbox", default: true, skipBody: false },
+    { key: "rate_limit_tier", label: "Rate limit tier", type: "text", placeholder: "0 = default", default: "0" },
+  ],
+  "/key#DELETE": [
+    { key: "id", label: "Key ID", type: "text", placeholder: "e.g. 1", default: "1" },
+  ],
+  "/worker/command#POST": [
+    { key: "worker", label: "Worker name", type: "text", placeholder: "e.g. worker-1", default: "worker-1" },
+    { key: "command", label: "Command", type: "text", placeholder: "e.g. STATUS, DRAIN, SHUTDOWN, REBOOT", default: "STATUS" },
+  ],
+};
+
+function openApiPlay(method, path, sectionIndex) {
+  const group = apiSurface[Number(sectionIndex)];
+  const kind = group.title === "Management" ? "management" : "proxy";
+  const modal = $("#api-play-modal");
+  const fieldsDiv = $("#api-play-fields");
+  const noBody = $("#api-play-no-body");
+  const previewPre = $("#api-play-body-preview");
+  const sendBtn = $("#api-play-send");
+  const responseDiv = $("#api-play-response");
+  const statusSpan = $("#api-play-status");
+  const bodyPre = $("#api-play-response-body");
+
+  // Set title
+  $("#api-play-method").textContent = method;
+  $("#api-play-path").textContent = path;
+  $("#api-play-method").className = `method ${method.toLowerCase()}`;
+
+  // Look up schema: try method-specific key first, then path-only
+  const methodKey = `${path}#${method}`;
+  let schemas = apiFieldSchemas[methodKey];
+  if (schemas === undefined) schemas = apiFieldSchemas[path];
+  if (schemas === undefined) schemas = [];
+
+  // Filter out hidden fields (only used for body building, not shown)
+  const visibleSchemas = schemas.filter((f) => f.skipBodyBuild !== "hide");
+  const hasBody = method !== "GET";
+
+  // Reset
+  responseDiv.style.display = "none";
+  statusSpan.textContent = "";
+  bodyPre.textContent = "";
+  sendBtn.disabled = false;
+  sendBtn.textContent = "Send";
+
+  // Render fields or no-body note
+  if (!hasBody || visibleSchemas.length === 0) {
+    fieldsDiv.innerHTML = "";
+    noBody.style.display = "block";
+    previewPre.textContent = hasBody ? "{}" : "No body needed.";
+  } else {
+    noBody.style.display = "none";
+    fieldsDiv.innerHTML = visibleSchemas
+      .map(
+        (f, i) =>
+          `<div class="api-play-field">
+            <label for="apf-${i}">${escapeHtml(f.label)}</label>
+            ${
+              f.type === "checkbox"
+                ? `<input type="checkbox" id="apf-${i}" data-key="${escapeAttr(f.key)}" ${f.default ? "checked" : ""}>`
+                : `<input type="text" id="apf-${i}" data-key="${escapeAttr(f.key)}" placeholder="${escapeAttr(f.placeholder)}" value="${escapeAttr(f.default)}" class="code-textarea" style="resize:none;height:auto;padding:8px 10px;font-size:13px">`
+            }
+          </div>`,
+      )
+      .join("");
+    // Update preview on any input
+    fieldsDiv.querySelectorAll("input").forEach((el) => {
+      el.addEventListener("input", () => updateApiPlayPreview());
+      el.addEventListener("change", () => updateApiPlayPreview());
+    });
+    updateApiPlayPreview();
+  }
+
+  // Store context on send button
+  sendBtn.dataset.kind = kind;
+  sendBtn.dataset.method = method;
+  sendBtn.dataset.path = path;
+  sendBtn.dataset.schemasKey = methodKey;
+  sendBtn.dataset.hasBody = hasBody ? "1" : "0";
+
+  // Remove old listener and attach new one
+  const newSend = sendBtn.cloneNode(true);
+  sendBtn.parentNode.replaceChild(newSend, sendBtn);
+  newSend.addEventListener("click", () => sendApiPlay(newSend));
+
+  // Show modal
+  modal.style.display = "flex";
+
+  // Close on overlay click
+  modal.onclick = (e) => { if (e.target === modal) closeApiPlay(); };
+}
+
+function updateApiPlayPreview() {
+  const fieldsDiv = $("#api-play-fields");
+  const previewPre = $("#api-play-body-preview");
+  const inputs = fieldsDiv.querySelectorAll("input");
+  const body = {};
+  for (const input of inputs) {
+    const key = input.dataset.key;
+    const val = input.type === "checkbox" ? input.checked : input.value.trim();
+    if (val === "" && input.type !== "checkbox") continue;
+    // Support dotted paths like "messages[0].content"
+    setNested(body, key, val);
+  }
+  previewPre.textContent = Object.keys(body).length
+    ? JSON.stringify(body, null, 2)
+    : "{}";
+}
+
+function setNested(obj, path, value) {
+  const parts = path.split(".");
+  let cur = obj;
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    const arrMatch = part.match(/^(\w+)\[(\d+)\]$/);
+    if (arrMatch) {
+      const arrKey = arrMatch[1];
+      const idx = Number(arrMatch[2]);
+      if (!cur[arrKey]) cur[arrKey] = [];
+      if (i === parts.length - 1) {
+        // If value is a comma-separated string for the "documents" field, split into array
+        if (typeof value === "string" && (arrKey === "documents" || arrKey === "files")) {
+          cur[arrKey][idx] = value.split(",").map((s) => s.trim());
+        } else {
+          cur[arrKey][idx] = value;
+        }
+      } else {
+        if (!cur[arrKey][idx]) cur[arrKey][idx] = {};
+        cur = cur[arrKey][idx];
+      }
+    } else {
+      if (i === parts.length - 1) {
+        cur[part] = value;
+      } else {
+        if (!cur[part]) cur[part] = {};
+        cur = cur[part];
+      }
+    }
+  }
+}
+
+function closeApiPlay() {
+  $("#api-play-modal").style.display = "none";
+}
+
+async function sendApiPlay(btn) {
+  const method = btn.dataset.method;
+  const path = btn.dataset.path;
+  const kind = btn.dataset.kind;
+  const hasBody = btn.dataset.hasBody === "1";
+  const responseDiv = $("#api-play-response");
+  const statusSpan = $("#api-play-status");
+  const bodyPre = $("#api-play-response-body");
+
+  btn.disabled = true;
+  btn.textContent = "Sending...";
+
+  try {
+    // Build body from fields - use the schemas to build properly
+    let body = null;
+    if (hasBody && method !== "GET") {
+      const schemasKey = btn.dataset.schemasKey;
+      let schemas = apiFieldSchemas[schemasKey];
+      if (schemas === undefined) schemas = apiFieldSchemas[path];
+      if (schemas === undefined) schemas = [];
+      const visibleSchemas = schemas.filter((f) => f.skipBodyBuild !== "hide");
+
+      if (visibleSchemas.length > 0) {
+        body = {};
+        for (const schema of visibleSchemas) {
+          const input = document.querySelector(`#api-play-fields input[data-key="${escapeAttr(schema.key)}"]`);
+          if (!input) continue;
+          let val = input.type === "checkbox" ? input.checked : input.value.trim();
+          if (val === "" && input.type !== "checkbox") continue;
+
+          // Special handling: comma-separated fields ending in "s" that should be arrays
+          if (typeof val === "string" && (schema.key === "documents" || schema.key === "files" || schema.key === "images")) {
+            val = val.split(",").map((s) => s.trim());
+          }
+          setNested(body, schema.key, val);
+        }
+        // Remove empty keys
+        for (const key of Object.keys(body)) {
+          if (body[key] === "" || body[key] === null) delete body[key];
+        }
+      }
+    }
+
+    const fetchOpts = { method, headers: authHeaders(body ? true : false) };
+    if (body && method !== "GET" && method !== "DELETE") {
+      fetchOpts.body = JSON.stringify(body);
+    }
+
+    const fullPath = apiUrl(kind, path);
+    const response = await fetch(fullPath, fetchOpts);
+    const text = await response.text();
+
+    statusSpan.textContent = `${response.status} ${response.statusText}`;
+    statusSpan.style.color = response.ok ? "var(--accent-strong)" : "var(--danger)";
+
+    let displayText = text;
+    try {
+      displayText = JSON.stringify(JSON.parse(text), null, 2);
+    } catch { /* raw text */ }
+    bodyPre.textContent = displayText;
+    responseDiv.style.display = "block";
+
+    // Copy handler
+    $("#api-play-copy-response").onclick = () => {
+      navigator.clipboard.writeText(displayText).then(() => toast("Response copied")).catch(() => {});
+    };
+  } catch (err) {
+    statusSpan.textContent = `Error: ${err.message}`;
+    statusSpan.style.color = "var(--danger)";
+    bodyPre.textContent = "";
+    responseDiv.style.display = "block";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Send";
+  }
 }
 
 function selectModel(source, name, defaultMode) {
@@ -1498,14 +2040,21 @@ function selectModel(source, name, defaultMode) {
     source,
     name,
     mode: defaultMode || "chat",
+    worker: "",
   };
   state.lastRequest = null;
-  $("#model-console-mode").disabled = false;
+  const modeSelect = $("#model-console-mode");
+  modeSelect.disabled = false;
+  modeSelect.value = state.selectedModel.mode;
   $("#model-run-button").disabled = false;
+  $("#model-run-button").querySelector(".button-label").textContent = "Run";
+  $("#model-mode-hint").textContent = "";
   renderModelConsole();
   renderRequestInfo();
   renderPromptImages();
   setPromptOutput("Response will appear here.", true);
+  $("#copy-response-button").style.display = "none";
+  $("#clear-response-button").style.display = "none";
 }
 
 function renderModelConsole() {
@@ -1515,9 +2064,9 @@ function renderModelConsole() {
     $("#model-console-subtitle").textContent =
       "Choose a model from either list.";
     $("#model-console-mode").disabled = true;
+    $("#model-worker-group").classList.add("hidden");
     $("#model-run-button").disabled = true;
-    $("#prompt-images").disabled = true;
-    $("#prompt-image-button").disabled = true;
+    $("#model-mode-hint").textContent = "Select a model first";
     renderRequestInfo();
     return;
   }
@@ -1527,10 +2076,75 @@ function renderModelConsole() {
       ? "Ollama native endpoints"
       : "OpenAI-compatible endpoints";
   $("#model-console-mode").value = selected.mode;
+  renderModelWorkerSelect();
   renderPromptImages();
 }
 
+function renderModelWorkerSelect() {
+  const selected = state.selectedModel;
+  const group = $("#model-worker-group");
+  const select = $("#model-console-worker");
+  if (!selected || !group || !select) {
+    group?.classList.add("hidden");
+    return;
+  }
+
+  const workers = workersForModel(selected);
+  const current = workers.includes(selected.worker) ? selected.worker : "";
+  selected.worker = current;
+  select.innerHTML = [
+    `<option value="">Any</option>`,
+    ...workers.map(
+      (worker) =>
+        `<option value="${escapeAttr(worker)}">${escapeHtml(worker)}</option>`,
+    ),
+  ].join("");
+  select.value = current;
+  group.classList.remove("hidden");
+}
+
+function workersForModel(selected) {
+  return Object.entries(state.data.tags || {})
+    .filter(([worker, models]) => {
+      if (selected.source === "ollama" && workerBackend(worker) === "vllm") {
+        return false;
+      }
+      return (Array.isArray(models) ? models : []).some((model) =>
+        modelNamesMatch(workerModelName(model), selected.name),
+      );
+    })
+    .map(([worker]) => worker)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function workerBackend(worker) {
+  return (
+    state.data.connections?.[worker]?.backend ||
+    state.data.workers?.[worker]?.backend ||
+    state.data.versions?.[worker]?.backend ||
+    ""
+  );
+}
+
+function workerModelName(model) {
+  if (typeof model === "string") return model;
+  return model?.model || model?.name || model?.id || "";
+}
+
+function modelNamesMatch(left, right) {
+  if (left === right) return true;
+  const bare = (value) =>
+    String(value).endsWith(":latest") ? String(value).slice(0, -7) : String(value);
+  return bare(left) === bare(right);
+}
+
 function beginRequest(selected, path, method, body, input) {
+  state.isRunning = true;
+  const runBtn = $("#model-run-button");
+  runBtn.disabled = true;
+  runBtn.querySelector(".button-label").classList.add("hidden");
+  runBtn.querySelector(".button-spinner").classList.remove("hidden");
+
   const bodyText = JSON.stringify(body);
   const images = state.promptImages || [];
   state.lastRequest = {
@@ -1539,6 +2153,7 @@ function beginRequest(selected, path, method, body, input) {
     source: selected.source,
     mode: selected.mode,
     model: selected.name,
+    worker: selected.worker || null,
     method,
     path,
     status: null,
@@ -1564,6 +2179,14 @@ function beginRequest(selected, path, method, body, input) {
   renderRequestInfo();
 }
 
+function finishRun() {
+  state.isRunning = false;
+  const runBtn = $("#model-run-button");
+  runBtn.disabled = false;
+  runBtn.querySelector(".button-label").classList.remove("hidden");
+  runBtn.querySelector(".button-spinner").classList.add("hidden");
+}
+
 function updateRequest(patch) {
   if (!state.lastRequest) return;
   state.lastRequest = { ...state.lastRequest, ...patch };
@@ -1583,6 +2206,7 @@ function finishRequest(result) {
     durationMs: finishedAt.getTime() - state.lastRequest.startedAt.getTime(),
   };
   renderRequestInfo();
+  finishRun();
 }
 
 function renderRequestInfo() {
@@ -1604,6 +2228,7 @@ function renderRequestInfo() {
     `<div class="request-card-grid">
       ${requestSection("Route", [
         ["Model", request.model],
+        ["Worker", request.worker || "Any"],
         ["Source", request.source],
         ["Mode", request.mode],
         ["Endpoint", `${request.method} ${request.path}`],
@@ -1840,7 +2465,7 @@ async function handlePromptImages(event) {
     event.target.value = "";
     renderPromptImages();
   } catch (error) {
-    setStatus(`Image upload failed: ${error.message || error}`, true);
+    toast(`Image upload failed: ${error.message || error}`, true);
   }
 }
 
@@ -1898,14 +2523,17 @@ function renderPromptImages() {
 
 async function runPrompt(event) {
   event.preventDefault();
+  if (state.isRunning) return;
   const selected = state.selectedModel;
   const input = $("#prompt-text").value;
-  if (!selected) return setStatus("Select a model first.", true);
+  if (!selected) return toast("Select a model first.", true);
   if (selected.mode === "embedding" && state.promptImages.length) {
-    return setStatus("Images can only be sent in chat mode.", true);
+    return toast("Images can only be sent in chat mode.", true);
   }
   setPromptOutput("Running...", true);
   setStatus(`Running ${selected.mode} on ${selected.name}...`);
+  $("#copy-response-button").style.display = "none";
+  $("#clear-response-button").style.display = "none";
 
   if (selected.mode === "embedding") {
     await runEmbedding(selected, input);
@@ -1924,6 +2552,7 @@ async function runPrompt(event) {
       "/v1/chat/completions",
       body,
       parseOpenAiStream,
+      selected.worker,
     );
   } else {
     const body = {
@@ -1936,10 +2565,14 @@ async function runPrompt(event) {
       "/api/chat",
       body,
       parseOllamaChatStream,
+      selected.worker,
     );
   }
   finishRequest("done");
   setStatus("Prompt finished.");
+  // Show copy/clear buttons
+  $("#copy-response-button").style.display = "";
+  $("#clear-response-button").style.display = "";
 }
 
 function openAiChatMessage(text, images) {
@@ -1975,6 +2608,7 @@ async function runEmbedding(selected, input) {
     method: "POST",
     body,
     expected: [200, 400, 403, 404, 500],
+    node: selected.worker,
   });
   updateRequest({
     status: response.status,
@@ -1985,13 +2619,16 @@ async function runEmbedding(selected, input) {
   });
   finishRequest(response.status === 200 ? "done" : "error");
   setPromptOutput(summarizeEmbeddingResponse(response.status, response.body));
+  // Show copy/clear buttons
+  $("#copy-response-button").style.display = "";
+  $("#clear-response-button").style.display = "";
 }
 
-async function streamRequest(path, body, parser) {
+async function streamRequest(path, body, parser, node = "") {
   try {
-    const response = await fetch(`/api/proxy${path}`, {
+    const response = await fetch(apiUrl("proxy", path), {
       method: "POST",
-      headers: authHeaders(),
+      headers: authHeaders(true, node),
       body: JSON.stringify(body),
     });
     updateRequest({
@@ -2182,9 +2819,9 @@ function collectEmbeddingVectors(value, vectors) {
 
 async function api(kind, path, options = {}) {
   const method = options.method || "GET";
-  const response = await fetch(`/api/${kind}${path}`, {
+  const response = await fetch(apiUrl(kind, path), {
     method,
-    headers: authHeaders(options.body),
+    headers: authHeaders(Boolean(options.body), options.node),
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
   const text = await response.text();
@@ -2198,19 +2835,29 @@ async function api(kind, path, options = {}) {
   return { status: response.status, body };
 }
 
+function apiUrl(kind, path) {
+  if (kind === "proxy") {
+    const endpoint = state.config?.proxyEndpoint;
+    if (!endpoint) throw new Error("HiveCore proxy endpoint is not configured");
+    return `${endpoint.replace(/\/+$/, "")}${path}`;
+  }
+  return `/api/${kind}${path}`;
+}
+
 async function requestJson(path) {
   const response = await fetch(path);
   if (!response.ok) throw new Error(`${path} returned ${response.status}`);
   return response.json();
 }
 
-function authHeaders(hasBody = true) {
+function authHeaders(hasBody = true, node = "") {
   const headers = {};
   if (hasBody) headers["content-type"] = "application/json";
   if (state.key) {
     headers.authorization = `Bearer ${state.key}`;
     headers["api-key"] = state.key;
   }
+  if (node) headers.node = node;
   return headers;
 }
 
@@ -2265,19 +2912,20 @@ function renderApiSurface() {
     }))
     .filter((group) => group.endpoints.length > 0)
     .map(
-      (group) => `
+      (group, gi) => `
         <section class="api-card">
           <h3>${escapeHtml(group.title)}</h3>
           <div class="endpoint-list">
             ${group.endpoints
               .map(
                 ([method, path, scope]) => `
-                  <div class="endpoint">
+                  <div class="endpoint" data-action="api-endpoint" data-method="${escapeAttr(method)}" data-path="${escapeAttr(path)}" data-section="${gi}" title="Click to focus endpoint">
                     <span class="method ${method.toLowerCase()}">${method}</span>
                     <div>
                       <div class="path">${escapeHtml(path)}</div>
                       <div class="scope">${escapeHtml(scope)}</div>
                     </div>
+                    <button class="api-play-btn" data-action="api-play" data-section="${gi}" data-method="${escapeAttr(method)}" data-path="${escapeAttr(path)}" title="Play endpoint">&#9654;</button>
                   </div>
                 `,
               )
@@ -2418,6 +3066,26 @@ function maskToken(token) {
 
 function stringifyError(value) {
   return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+// ── Toast system ──
+function toast(message, error = false) {
+  const container = $("#toast-container");
+  const el = document.createElement("div");
+  el.className = `toast${error ? " error" : ""}`;
+  el.innerHTML = `<span>${escapeHtml(message)}</span><button type="button" class="toast-close">✕</button>`;
+  container.appendChild(el);
+
+  el.querySelector(".toast-close").addEventListener("click", () => dismissToast(el));
+
+  // Auto-dismiss after 4s
+  setTimeout(() => dismissToast(el), 4000);
+}
+
+function dismissToast(el) {
+  if (el.classList.contains("dismissing")) return;
+  el.classList.add("dismissing");
+  setTimeout(() => el.remove(), 200);
 }
 
 function setStatus(message, error = false) {

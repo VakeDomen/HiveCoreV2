@@ -7,6 +7,9 @@
         <link rel="stylesheet" href="/styles.css" />
     </head>
     <body>
+        <!-- Toast container -->
+        <div id="toast-container" class="toast-container" role="alert" aria-live="polite"></div>
+
         <section id="login-screen" class="login-screen">
             <div class="login-card">
                 <div class="brand login-brand">
@@ -34,19 +37,22 @@
                             👁
                         </button>
                     </div>
-                    <button class="primary" type="submit">Connect</button>
+                    <button class="primary" type="submit" id="login-button">Connect</button>
                 </form>
 
-                <div class="connection">
-                    <div>
-                        <span>Proxy</span>
-                        <code id="login-proxy-endpoint">-</code>
+                <details class="connection-details">
+                    <summary>Connection details</summary>
+                    <div class="connection">
+                        <div>
+                            <span>Proxy</span>
+                            <code id="login-proxy-endpoint">-</code>
+                        </div>
+                        <div>
+                            <span>Management</span>
+                            <code id="login-management-endpoint">-</code>
+                        </div>
                     </div>
-                    <div>
-                        <span>Management</span>
-                        <code id="login-management-endpoint">-</code>
-                    </div>
-                </div>
+                </details>
 
                 <section id="login-status-line" class="status-line">
                     Enter a key to connect.
@@ -55,13 +61,16 @@
         </section>
 
         <div id="dashboard-shell" class="shell hidden">
-            <aside class="sidebar">
-                <div class="brand">
-                    <div class="brand-mark">H</div>
-                    <div>
-                        <h1>HiveCore</h1>
-                        <p>Admin dashboard</p>
+            <aside class="sidebar" id="sidebar">
+                <div class="sidebar-header">
+                    <div class="brand">
+                        <div class="brand-mark">H</div>
+                        <div>
+                            <h1>HiveCore</h1>
+                            <p>Admin dashboard</p>
+                        </div>
                     </div>
+                    <button id="sidebar-toggle" class="icon-button sidebar-toggle" type="button" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
                 </div>
 
                 <button id="logout-button" class="secondary" type="button">
@@ -80,22 +89,24 @@
                 </div>
 
                 <nav>
-                    <button class="nav-button active" data-view="overview">
+                    <button class="nav-button active" data-view="overview" data-shortcut="1">
                         Overview
                     </button>
-                    <button class="nav-button" data-view="models">
-                        Models
-                    </button>
-                    <button class="nav-button management-read" data-view="keys">
-                        Clients
-                    </button>
-                    <button class="nav-button management-read" data-view="workers">
+                    <button class="nav-button management-read" data-view="workers" data-shortcut="2">
                         Workers
                     </button>
-                    <button class="nav-button management-read" data-view="stats">
+                    <button class="nav-button" data-view="models" data-shortcut="3">
+                        Models
+                    </button>
+                    <button class="nav-button management-read" data-view="keys" data-shortcut="4">
+                        Keys
+                    </button>
+                    <button class="nav-button management-read" data-view="stats" data-shortcut="5">
                         Stats
                     </button>
-                    <button class="nav-button" data-view="api">API</button>
+                    <button class="nav-button" data-view="api" data-shortcut="6">
+                        API
+                    </button>
                 </nav>
             </aside>
 
@@ -110,7 +121,7 @@
                             Refresh
                             <select id="refresh-interval">
                                 <option value="0">Off</option>
-                                <option value="5000" selected>5s</option>
+                                <option value="5000">5s</option>
                                 <option value="10000">10s</option>
                                 <option value="30000">30s</option>
                             </select>
@@ -125,9 +136,28 @@
                     </div>
                 </header>
 
+                <!-- Disconnect banner -->
+                <div id="disconnect-banner" class="disconnect-banner hidden">
+                    Connection lost. <button class="small" id="reconnect-button">Reconnect</button>
+                </div>
+
                 <section id="status-line" class="status-line">
                     Enter a key to connect.
                 </section>
+
+                <!-- Loading skeleton -->
+                <div id="loading-skeleton" class="loading-skeleton hidden">
+                    <div class="skeleton-metrics">
+                        <div class="skeleton metric"></div>
+                        <div class="skeleton metric"></div>
+                        <div class="skeleton metric"></div>
+                        <div class="skeleton metric"></div>
+                    </div>
+                    <div class="skeleton-panels">
+                        <div class="skeleton panel-lg"></div>
+                        <div class="skeleton panel-lg"></div>
+                    </div>
+                </div>
 
                 <section id="overview-view" class="view active">
                     <div class="metric-grid">
@@ -201,6 +231,59 @@
                     </div>
                 </section>
 
+                <section id="workers-view" class="view">
+                    <div class="split">
+                        <section class="panel">
+                            <div class="panel-head">
+                                <h3>Workers</h3>
+                                <div class="panel-actions">
+                                    <input
+                                        id="worker-model-filter"
+                                        class="compact-input"
+                                        placeholder="Filter by model"
+                                    />
+                                    <button
+                                        class="small"
+                                        data-action="load-workers"
+                                    >
+                                        Reload
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="workers-grid" class="worker-grid"></div>
+                        </section>
+                        <section class="panel">
+                            <div class="panel-head">
+                                <h3>Queue</h3>
+                                <button class="small" data-action="load-queue">
+                                    Reload
+                                </button>
+                            </div>
+                            <div id="queue-view" class="queue-view"></div>
+                        </section>
+                    </div>
+                    <section class="panel admin-write">
+                        <div class="panel-head">
+                            <h3>Worker Command</h3>
+                        </div>
+                        <form
+                            id="worker-command-form"
+                            class="inline-form compact"
+                        >
+                            <input
+                                id="command-worker"
+                                placeholder="worker name"
+                            />
+                            <select id="command-name">
+                                <option value="REBOOT">REBOOT</option>
+                                <option value="SHUTDOWN">SHUTDOWN</option>
+                                <option value="UPDATE">UPDATE_OLLAMA</option>
+                            </select>
+                            <button class="danger" type="submit">Send</button>
+                        </form>
+                    </section>
+                </section>
+
                 <section id="models-view" class="view">
                     <section class="panel model-console">
                         <div class="panel-head"></div>
@@ -214,19 +297,26 @@
                                         id="model-console-subtitle"
                                         class="panel-subtitle"
                                     >
-                                        Choose a model from either list.
+                                        Choose a model from the lists below
                                     </p>
                                 </div>
-                                <select id="model-console-mode" disabled>
-                                    <option value="chat">Chat</option>
-                                    <option value="embedding">Embedding</option>
-                                </select>
+                                <div id="model-mode-group" class="model-mode-group">
+                                    <select id="model-console-mode" disabled>
+                                        <option value="chat">Chat</option>
+                                        <option value="embedding">Embedding</option>
+                                    </select>
+                                    <label id="model-worker-group" class="model-worker-group hidden">
+                                        <span>Worker</span>
+                                        <select id="model-console-worker">
+                                            <option value="">Any</option>
+                                        </select>
+                                    </label>
+                                    <span id="model-mode-hint" class="model-mode-hint">Select a model first</span>
+                                </div>
                                 <form id="prompt-form" class="prompt-form">
                                     <label>
                                         Input
-                                        <textarea id="prompt-text" rows="5">
-What's the meaning of life?</textarea
-                                        >
+                                        <textarea id="prompt-text" rows="5" placeholder="Enter your prompt here..."></textarea>
                                     </label>
                                     <div class="image-upload">
                                         <div class="image-upload-actions">
@@ -257,15 +347,40 @@ What's the meaning of life?</textarea
                                             type="submit"
                                             disabled
                                         >
-                                            Run
+                                            <span class="button-label">Run</span>
+                                            <span class="button-spinner hidden"></span>
                                         </button>
+                                        <span id="shortcut-hint" class="shortcut-hint">Ctrl+Enter</span>
                                     </div>
                                 </form>
-                                <div
-                                    id="prompt-output"
-                                    class="response-box empty"
-                                >
-                                    Response will appear here.
+                                <div class="response-wrap">
+                                    <div class="response-head">
+                                        <span class="response-head-label">Response</span>
+                                        <button
+                                            id="copy-response-button"
+                                            class="icon-button small"
+                                            type="button"
+                                            title="Copy response to clipboard"
+                                            style="display:none"
+                                        >
+                                            📋
+                                        </button>
+                                        <button
+                                            id="clear-response-button"
+                                            class="icon-button small"
+                                            type="button"
+                                            title="Clear response"
+                                            style="display:none"
+                                        >
+                                            ✕
+                                        </button>
+                                    </div>
+                                    <div
+                                        id="prompt-output"
+                                        class="response-box empty"
+                                    >
+                                        Select a model and run a prompt to see the response here.
+                                    </div>
                                 </div>
                             </div>
                             <div class="request-pane">
@@ -401,59 +516,6 @@ What's the meaning of life?</textarea
                     </div>
                 </section>
 
-                <section id="workers-view" class="view">
-                    <div class="split">
-                        <section class="panel">
-                            <div class="panel-head">
-                                <h3>Workers</h3>
-                                <div class="panel-actions">
-                                    <input
-                                        id="worker-model-filter"
-                                        class="compact-input"
-                                        placeholder="Filter by model"
-                                    />
-                                    <button
-                                        class="small"
-                                        data-action="load-workers"
-                                    >
-                                        Reload
-                                    </button>
-                                </div>
-                            </div>
-                            <div id="workers-grid" class="worker-grid"></div>
-                        </section>
-                        <section class="panel">
-                            <div class="panel-head">
-                                <h3>Queue</h3>
-                                <button class="small" data-action="load-queue">
-                                    Reload
-                                </button>
-                            </div>
-                            <pre id="queue-json" class="json-box">{}</pre>
-                        </section>
-                    </div>
-                    <section class="panel admin-write">
-                        <div class="panel-head">
-                            <h3>Worker Command</h3>
-                        </div>
-                        <form
-                            id="worker-command-form"
-                            class="inline-form compact"
-                        >
-                            <input
-                                id="command-worker"
-                                placeholder="worker name"
-                            />
-                            <select id="command-name">
-                                <option value="REBOOT">REBOOT</option>
-                                <option value="SHUTDOWN">SHUTDOWN</option>
-                                <option value="UPDATE">UPDATE_OLLAMA</option>
-                            </select>
-                            <button class="danger" type="submit">Send</button>
-                        </form>
-                    </section>
-                </section>
-
                 <section id="stats-view" class="view">
                     <section class="panel">
                         <div class="panel-head stats-head">
@@ -560,7 +622,7 @@ What's the meaning of life?</textarea
                     <div class="stats-layout">
                         <section class="panel">
                             <div class="panel-head">
-                                <h3>Clients</h3>
+                                <h3>Keys</h3>
                             </div>
                             <div id="usage-keys" class="table-wrap"></div>
                         </section>
@@ -588,6 +650,31 @@ What's the meaning of life?</textarea
 
                 <section id="api-view" class="view">
                     <div id="api-surface" class="api-grid"></div>
+                    <div id="api-play-modal" class="modal-overlay" style="display:none">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <span class="modal-title"><span id="api-play-method" class="method">GET</span> <span id="api-play-path"></span></span>
+                                <button class="modal-close" data-action="api-play-close">&times;</button>
+                            </div>
+                            <div class="modal-body">
+                                <div id="api-play-no-body" style="display:none" class="no-body-note">No body needed for this request.</div>
+                                <div id="api-play-fields"></div>
+                                <div class="form-group">
+                                    <label>Request Body <span class="body-preview-label">(generated)</span></label>
+                                    <pre id="api-play-body-preview" class="code-block preview-body">&#123; &#125;</pre>
+                                </div>
+                                <button id="api-play-send" class="button primary">Send</button>
+                                <div id="api-play-response" style="display:none">
+                                    <h4>Response</h4>
+                                    <div class="modal-response-meta">
+                                        <span>Status: <strong id="api-play-status"></strong></span>
+                                        <button id="api-play-copy-response" class="button small">Copy</button>
+                                    </div>
+                                    <pre id="api-play-response-body" class="code-block"></pre>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </section>
             </main>
         </div>
