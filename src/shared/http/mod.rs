@@ -233,11 +233,23 @@ impl HttpResponse {
     }
 
     pub fn write_to(&self, stream: &mut TcpStream) -> io::Result<()> {
-        write!(stream, "HTTP/1.1 {} {}\r\n", self.status_code, self.reason)?;
+        // Build the whole head (status line + headers + blank line) into one
+        // buffer and write it with a single write_all, instead of one write!
+        // per field. This avoids a syscall per header.
+        let capacity = 64
+            + self
+                .headers
+                .iter()
+                .map(|(name, value)| name.len() + value.len() + 4)
+                .sum::<usize>();
+        let mut head = Vec::with_capacity(capacity);
+        use std::io::Write as _;
+        write!(head, "HTTP/1.1 {} {}\r\n", self.status_code, self.reason)?;
         for (name, value) in &self.headers {
-            write!(stream, "{}: {}\r\n", name, value)?;
+            write!(head, "{}: {}\r\n", name, value)?;
         }
-        write!(stream, "\r\n")?;
+        write!(head, "\r\n")?;
+        stream.write_all(&head)?;
         stream.write_all(&self.body)?;
         stream.flush()
     }

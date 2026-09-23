@@ -512,11 +512,11 @@ where
         capture.headers = headers.clone();
     }
 
-    client_stream.write_all(status_line.as_bytes())?;
-    for (name, value) in sanitize_response_headers(&headers, chunked) {
-        client_stream.write_all(format!("{name}: {value}\r\n").as_bytes())?;
-    }
-    client_stream.write_all(b"\r\n")?;
+    let mut head = Vec::with_capacity(64 + headers.iter().map(|(n, v)| n.len() + v.len() + 4).sum::<usize>());
+    head.extend_from_slice(status_line.as_bytes());
+    sanitize_response_headers(&headers, chunked, &mut head);
+    head.extend_from_slice(b"\r\n");
+    client_stream.write_all(&head)?;
 
     let observed_usage = if chunked {
         if let Some(capture) = capture.as_deref_mut() {
@@ -627,8 +627,17 @@ fn capture_worker_response(reader: &mut BufReader<TcpStream>) -> io::Result<Work
     })
 }
 
-fn sanitize_response_headers(headers: &[(String, String)], chunked: bool) -> Vec<(String, String)> {
-    let mut sanitized = Vec::with_capacity(headers.len());
+/// Append the sanitized response headers to `out` as raw `Name: value\r\n`
+/// bytes. Avoids allocating a `Vec<(String, String)>` and re-serializing each
+/// header just to relay it. `chunked` drops any `content-length` and ensures a
+/// single `transfer-encoding: chunked`; an `access-control-allow-origin` is
+/// always present.
+fn sanitize_response_headers(
+    headers: &[(String, String)],
+    chunked: bool,
+    out: &mut Vec<u8>,
+) {
+    use std::io::Write as _;
     let mut transfer_encoding = None;
     let mut has_allow_origin = false;
 
@@ -645,21 +654,20 @@ fn sanitize_response_headers(headers: &[(String, String)], chunked: bool) -> Vec
         if name.eq_ignore_ascii_case("access-control-allow-origin") {
             has_allow_origin = true;
         }
-        sanitized.push((name.clone(), value.clone()));
+        let _ = writeln!(out, "{name}: {value}\r");
     }
 
     if !has_allow_origin {
-        sanitized.push(("Access-Control-Allow-Origin".to_string(), "*".to_string()));
+        let _ = writeln!(out, "Access-Control-Allow-Origin: *\r");
     }
 
     if chunked {
-        sanitized.push((
-            "Transfer-Encoding".to_string(),
-            transfer_encoding.unwrap_or_else(|| "chunked".to_string()),
-        ));
+        let _ = writeln!(
+            out,
+            "Transfer-Encoding: {}\r",
+            transfer_encoding.as_deref().unwrap_or("chunked")
+        );
     }
-
-    sanitized
 }
 
 fn captured_response_for_request(
@@ -692,8 +700,14 @@ where
 {
     let mut usage_scanner = UsageLineScanner::default();
 
+    // Reuse a single scratch buffer for the chunk body and size line rather
+    // than allocating a fresh `Vec` + `String` per chunk. For streaming LLM
+    // output this is the dominant per-chunk overhead.
+    let mut size_line = String::new();
+    let mut body: Vec<u8> = Vec::new();
+
     loop {
-        let mut size_line = String::new();
+        size_line.clear();
         if reader.read_line(&mut size_line)? == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -708,18 +722,19 @@ where
             break;
         }
 
-        let mut chunk = vec![0_u8; size];
-        reader.read_exact(&mut chunk)?;
-        client_stream.write_all(&chunk)?;
+        body.clear();
+        body.resize(size, 0);
+        reader.read_exact(&mut body)?;
+        client_stream.write_all(&body)?;
         if let Some(capture) = capture.as_deref_mut() {
-            capture.push_event(chunk.len(), capture_body(&chunk));
+            capture.push_event(body.len(), capture_body(&body));
         }
 
         let mut crlf = [0_u8; 2];
         reader.read_exact(&mut crlf)?;
         client_stream.write_all(&crlf)?;
 
-        usage_scanner.push(&chunk);
+        usage_scanner.push(&body);
     }
 
     Ok(usage_scanner.finish())
