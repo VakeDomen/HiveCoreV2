@@ -43,6 +43,7 @@ enum ProxyEndpoint {
     VllmScore,
     VllmRerank,
     VllmModelFieldRoute,
+    VllmGenerativeScoring,
     VllmAnyWorker,
     VllmTargetedOnly,
 
@@ -95,7 +96,8 @@ pub fn plan_request(
         ProxyEndpoint::VllmCohereEmbed
         | ProxyEndpoint::VllmScore
         | ProxyEndpoint::VllmRerank
-        | ProxyEndpoint::VllmModelFieldRoute => {
+        | ProxyEndpoint::VllmModelFieldRoute
+        | ProxyEndpoint::VllmGenerativeScoring => {
             route_by_required_model(request, ModelRouteKind::VllmSpecific)
         }
         ProxyEndpoint::VllmAnyWorker => route_to_any_backend(state, WorkerBackendFilter::Vllm),
@@ -175,6 +177,7 @@ fn classify_endpoint(request: &HttpRequest) -> ProxyEndpoint {
         ("POST", "/tokenize") | ("POST", "/detokenize") => {
             return ProxyEndpoint::VllmModelFieldRoute;
         }
+        ("POST", "/generative_scoring") => return ProxyEndpoint::VllmGenerativeScoring,
         ("GET", "/tokenizer_info")
         | ("GET", "/version")
         | ("GET", "/load")

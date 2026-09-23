@@ -145,6 +145,7 @@ fn request_models(request: &HttpRequest) -> Vec<String> {
         | ("POST", "/v2/rerank")
         | ("POST", "/tokenize")
         | ("POST", "/detokenize")
+        | ("POST", "/generative_scoring")
         | ("POST", "/api/pull")
         | ("POST", "/api/push")
         | ("DELETE", "/api/delete")
