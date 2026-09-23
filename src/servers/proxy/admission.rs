@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::app::AppState;
 use crate::auth::{KeyRecord, Role};
 use crate::shared::http::{HttpRequest, extract_json_value};
@@ -119,7 +121,7 @@ fn admin_only_proxy_route(request: &HttpRequest) -> bool {
     )
 }
 
-pub fn authorized_key(state: &AppState, request: &HttpRequest) -> Option<KeyRecord> {
+pub fn authorized_key(state: &AppState, request: &HttpRequest) -> Option<Arc<KeyRecord>> {
     request
         .bearer_token()
         .and_then(|token| state.keys.verify(token, &[Role::Admin, Role::Client]))

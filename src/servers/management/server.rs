@@ -103,12 +103,12 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         };
 
         let response = match (request.method.as_str(), route_path) {
-            ("GET", "/key/me") => routes::me::get_me(&state, &key),
+            ("GET", "/key/me") => routes::me::get_me(&state, key.as_ref()),
             ("GET", "/key/me/usage") => {
                 let query = request.uri.split('?').nth(1).unwrap_or("");
-                routes::me::get_me_usage(&state, &key, query)
+                routes::me::get_me_usage(&state, key.as_ref(), query)
             }
-            ("GET", "/key/me/limits") => routes::me::get_me_limits(&state, &key),
+            ("GET", "/key/me/limits") => routes::me::get_me_limits(&state, key.as_ref()),
             _ => HttpResponse::new(404, "Not Found", Vec::new()),
         };
         let status_code = response.status_code;

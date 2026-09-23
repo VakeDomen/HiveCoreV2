@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::io;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::auth::{KeyRecord, Role};
 use crate::shared::log;
 use crate::shared::sqlite::SqliteKeyStore;
 
 pub struct KeyStore {
-    cache: RwLock<HashMap<String, KeyRecord>>,
+    cache: RwLock<HashMap<String, Arc<KeyRecord>>>,
     database: SqliteKeyStore,
 }
 
@@ -21,7 +21,7 @@ impl KeyStore {
         Ok(store)
     }
 
-    pub fn verify(&self, token: &str, allowed_roles: &[Role]) -> Option<KeyRecord> {
+    pub fn verify(&self, token: &str, allowed_roles: &[Role]) -> Option<Arc<KeyRecord>> {
         if let Some(record) = self
             .cache
             .read()
@@ -40,9 +40,12 @@ impl KeyStore {
             }
         };
 
+        // Insert and hand out the *same* Arc that was stored, so subsequent hits
+        // share one allocation instead of deep-cloning the record each time.
         if let Ok(mut guard) = self.cache.write() {
-            guard.insert(record.token.clone(), record.clone());
+            guard.insert(record.token.clone(), Arc::new(record));
         }
+        let record = self.cache.read().ok().and_then(|guard| guard.get(token).cloned())?;
         allowed_roles.contains(&record.role).then_some(record)
     }
 
@@ -66,7 +69,8 @@ impl KeyStore {
             rate_limit_tier,
         )?;
         if let Ok(mut guard) = self.cache.write() {
-            guard.insert(record.token.clone(), record.clone());
+            let shared = Arc::new(record.clone());
+            guard.insert(record.token.clone(), shared);
         }
         Ok(record)
     }
@@ -99,7 +103,7 @@ impl KeyStore {
         let records = self.list()?;
         let cache = records
             .into_iter()
-            .map(|record| (record.token.clone(), record))
+            .map(|record| (record.token.clone(), Arc::new(record)))
             .collect::<HashMap<_, _>>();
         let mut guard = self
             .cache
@@ -122,6 +126,7 @@ mod tests {
     use std::fs;
     use std::io;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     fn temp_db_path(test_name: &str) -> PathBuf {
@@ -502,6 +507,39 @@ mod tests {
         assert_eq!(second.name, "alice");
         assert_eq!(first.whitelist_models, vec!["llama3"]);
         assert_eq!(second.whitelist_models, vec!["llama3"]);
+
+        cleanup(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_returns_shared_arc_not_a_clone() -> io::Result<()> {
+        let path = temp_db_path("verify_shared_arc");
+        let store = KeyStore::new(path.to_str().expect("utf8 path"))?;
+        let token = Uuid::new_v4().to_string();
+        store.insert(
+            token.clone(),
+            Role::Client,
+            "alice".to_string(),
+            false,
+            vec!["llama3".to_string()],
+            Vec::new(),
+            "low".to_string(),
+        )?;
+
+        let first = store.verify(&token, &[Role::Client]).expect("first verify");
+        let second = store
+            .verify(&token, &[Role::Client])
+            .expect("second verify");
+        let third = store
+            .verify(&token, &[Role::Client])
+            .expect("third verify");
+
+        assert_eq!(first.name, "alice");
+        assert!(
+            Arc::ptr_eq(&first, &second) && Arc::ptr_eq(&second, &third),
+            "cache hits should share the same Arc<KeyRecord>, not deep-clone"
+        );
 
         cleanup(&path);
         Ok(())

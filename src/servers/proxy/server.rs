@@ -96,7 +96,7 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
         .map(|key| key.name.as_str())
         .unwrap_or("Unauthenticated");
 
-    match plan_request(&state, &request, visible_key.as_ref()) {
+    match plan_request(&state, &request, visible_key.as_deref()) {
         RoutePlan::Local(response) => {
             let status_code = response.status_code;
             response.write_to(&mut stream)?;
