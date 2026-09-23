@@ -302,13 +302,7 @@ mod tests {
         if let Some(token) = token {
             headers.insert("authorization".to_string(), format!("Bearer {token}"));
         }
-        HttpRequest {
-            method: "POST".to_string(),
-            uri: "/api/generate".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers,
-            body: body.to_vec(),
-        }
+        HttpRequest::new("POST", "/api/generate", "HTTP/1.1", headers, body.to_vec())
     }
 
     fn request_with_auth_to(
@@ -365,13 +359,13 @@ mod tests {
 
         let mut headers = HashMap::new();
         headers.insert("api-key".to_string(), token);
-        let request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/api/generate".to_string(),
-            protocol: "HTTP/1.1".to_string(),
+        let request = HttpRequest::new(
+            "POST",
+            "/api/generate",
+            "HTTP/1.1",
             headers,
-            body: br#"{"model":"llama3"}"#.to_vec(),
-        };
+            br#"{"model":"llama3"}"#.to_vec(),
+        );
 
         assert_eq!(authorize_request(&state, &request), Ok(()));
 

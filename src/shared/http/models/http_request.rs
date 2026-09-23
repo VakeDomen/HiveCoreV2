@@ -10,6 +10,28 @@ pub struct HttpRequest {
 }
 
 impl HttpRequest {
+    /// Construct a request with the given method, URI, protocol, headers and body.
+    pub fn new(
+        method: impl Into<String>,
+        uri: impl Into<String>,
+        protocol: impl Into<String>,
+        headers: HashMap<String, String>,
+        body: Vec<u8>,
+    ) -> Self {
+        Self {
+            method: method.into(),
+            uri: uri.into(),
+            protocol: protocol.into(),
+            headers,
+            body,
+        }
+    }
+
+    /// Convenience constructor for synthetic HIVE control/AUTH/probe frames (no headers, no body).
+    pub fn hive(method: impl Into<String>, uri: impl Into<String>) -> Self {
+        Self::new(method, uri, "HIVE", HashMap::new(), Vec::new())
+    }
+
     /// Look up a header by name (case-sensitive, must be lowercase).
     ///
     /// Header names are normalized to lowercase at parse time
@@ -45,16 +67,16 @@ mod tests {
     use std::collections::HashMap;
 
     fn request_with(headers: Vec<(&str, &str)>) -> HttpRequest {
-        HttpRequest {
-            method: "POST".to_string(),
-            uri: "/v1/chat/completions".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: headers
+        HttpRequest::new(
+            "POST",
+            "/v1/chat/completions",
+            "HTTP/1.1",
+            headers
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            body: Vec::new(),
-        }
+            Vec::new(),
+        )
     }
 
     #[test]

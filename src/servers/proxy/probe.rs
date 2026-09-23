@@ -35,13 +35,7 @@ pub fn probe_worker_json(
 }
 
 pub fn probe_worker_version(state: &AppState, worker: &str, timeout: Duration) -> Option<String> {
-    let request = HttpRequest {
-        method: "GET".to_string(),
-        uri: "/api/version".to_string(),
-        protocol: "HTTP/1.1".to_string(),
-        headers: Default::default(),
-        body: Vec::new(),
-    };
+    let request = HttpRequest::new("GET".to_string(), "/api/version".to_string(), "HTTP/1.1".to_string(), Default::default(), Vec::new());
     probe_worker_json(state, worker, request, timeout)?
         .get("version")
         .and_then(Value::as_str)
@@ -188,13 +182,7 @@ mod tests {
     }
 
     fn request(uri: &str) -> HttpRequest {
-        HttpRequest {
-            method: "GET".to_string(),
-            uri: uri.to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: HashMap::new(),
-            body: Vec::new(),
-        }
+        HttpRequest::new("GET", uri, "HTTP/1.1", HashMap::new(), Vec::new())
     }
 
     fn cleanup(path: &PathBuf) {

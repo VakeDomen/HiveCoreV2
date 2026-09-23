@@ -204,65 +204,35 @@ mod tests {
 
     #[test]
     fn systemone_evaluate_route_extracts_model() {
-        let req = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec(),
-        };
+        let req = HttpRequest::new("POST".to_string(), "/".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec());
         let models = request_models(&req);
         assert_eq!(models, vec!["systemone/diy-jev-0.1.0"]);
     }
 
     #[test]
     fn systemone_evaluate_v1_route_extracts_model() {
-        let req = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/v1/evaluate".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec(),
-        };
+        let req = HttpRequest::new("POST".to_string(), "/v1/evaluate".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec());
         let models = request_models(&req);
         assert_eq!(models, vec!["systemone/diy-jev-0.1.0"]);
     }
 
     #[test]
     fn systemone_systemone_route_extracts_model() {
-        let req = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/v1/systemone".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec(),
-        };
+        let req = HttpRequest::new("POST".to_string(), "/v1/systemone".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec());
         let models = request_models(&req);
         assert_eq!(models, vec!["systemone/diy-jev-0.1.0"]);
     }
 
     #[test]
     fn systemone_ai_run_route_extracts_model() {
-        let req = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/ai/run".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec(),
-        };
+        let req = HttpRequest::new("POST".to_string(), "/ai/run".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec());
         let models = request_models(&req);
         assert_eq!(models, vec!["systemone/diy-jev-0.1.0"]);
     }
 
     #[test]
     fn systemone_routes_are_not_admin_only() {
-        let req = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/v1/evaluate".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec(),
-        };
+        let req = HttpRequest::new("POST".to_string(), "/v1/evaluate".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"systemone/diy-jev-0.1.0"}"#.to_vec());
         assert!(!admin_only_proxy_route(&req));
     }
 }

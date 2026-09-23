@@ -168,13 +168,7 @@ fn authenticate_worker(
         connection_index = worker.register_connection(nonce);
     }
 
-    let response = HttpRequest {
-        method: "AUTH".to_string(),
-        uri: worker_name.clone(),
-        protocol: "HIVE".to_string(),
-        headers: Default::default(),
-        body: Vec::new(),
-    };
+    let response = HttpRequest::hive("AUTH", worker_name.clone());
     let bytes = serialize_request(&response);
     write_framed_request(writer, &bytes)?;
     touch_worker(
@@ -449,13 +443,7 @@ fn handle_poll(
         return Ok(());
     }
 
-    let pong = HttpRequest {
-        method: "PONG".to_string(),
-        uri: "/".to_string(),
-        protocol: "HIVE".to_string(),
-        headers: Default::default(),
-        body: Vec::new(),
-    };
+    let pong = HttpRequest::hive("PONG", "/");
     let bytes = serialize_request(&pong);
     write_framed_request(writer, &bytes)
 }

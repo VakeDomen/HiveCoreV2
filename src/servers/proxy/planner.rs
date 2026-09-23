@@ -699,13 +699,14 @@ fn parallel_probe_json(
             let tx = tx.clone();
             let body = body.clone();
             scope.spawn(move || {
-                let request = HttpRequest {
-                    method: if body.is_some() { "POST" } else { "GET" }.to_string(),
-                    uri: uri.to_string(),
-                    protocol: "HTTP/1.1".to_string(),
-                    headers: Default::default(),
-                    body: body.unwrap_or_default(),
-                };
+                let method = if body.is_some() { "POST" } else { "GET" };
+                let request = HttpRequest::new(
+                    method,
+                    uri,
+                    "HTTP/1.1",
+                    Default::default(),
+                    body.unwrap_or_default(),
+                );
                 let _ = tx.send(probe_worker_json(state, &worker, request, timeout));
             });
         }
@@ -771,13 +772,7 @@ mod tests {
     }
 
     fn request(method: &str, uri: &str, body: &[u8]) -> HttpRequest {
-        HttpRequest {
-            method: method.to_string(),
-            uri: uri.to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: HashMap::new(),
-            body: body.to_vec(),
-        }
+        HttpRequest::new(method, uri, "HTTP/1.1", HashMap::new(), body.to_vec())
     }
 
     fn test_state(test_name: &str) -> io::Result<(AppState, PathBuf)> {

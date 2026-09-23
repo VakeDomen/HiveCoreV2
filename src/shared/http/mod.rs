@@ -328,13 +328,13 @@ pub fn read_request_from_reader<R: BufRead>(reader: &mut R) -> io::Result<HttpRe
         }
     }
 
-    Ok(HttpRequest {
-        method: parts[0].to_string(),
-        uri: parts[1].to_string(),
+    Ok(HttpRequest::new(
+        parts[0].to_string(),
+        parts[1].to_string(),
         protocol,
         headers,
         body,
-    })
+    ))
 }
 
 pub fn write_framed_request(stream: &mut TcpStream, request_bytes: &[u8]) -> io::Result<()> {
@@ -461,46 +461,22 @@ mod tests {
 
     #[test]
     fn resolves_request_model_name_for_supported_routes() {
-        let request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/api/copy".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"source":"base-model","destination":"copy"}"#.to_vec(),
-        };
+        let request = HttpRequest::new("POST".to_string(), "/api/copy".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"source":"base-model","destination":"copy"}"#.to_vec());
 
         assert_eq!(request_model_name(&request).as_deref(), Some("base-model"));
     }
 
     #[test]
     fn resolves_show_model_name_from_name_field() {
-        let request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/api/show".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"name":"llama3"}"#.to_vec(),
-        };
+        let request = HttpRequest::new("POST".to_string(), "/api/show".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"name":"llama3"}"#.to_vec());
 
         assert_eq!(request_model_name(&request).as_deref(), Some("llama3"));
     }
 
     #[test]
     fn resolves_usage_model_name_only_for_inference_routes() {
-        let show_request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/api/show".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"llama3"}"#.to_vec(),
-        };
-        let chat_request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/v1/chat/completions".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"llama3"}"#.to_vec(),
-        };
+        let show_request = HttpRequest::new("POST".to_string(), "/api/show".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"llama3"}"#.to_vec());
+        let chat_request = HttpRequest::new("POST".to_string(), "/v1/chat/completions".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"llama3"}"#.to_vec());
 
         assert_eq!(request_usage_model_name(&show_request), None);
         assert_eq!(
@@ -508,13 +484,7 @@ mod tests {
             Some("llama3")
         );
 
-        let responses_request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/v1/responses".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"llama3"}"#.to_vec(),
-        };
+        let responses_request = HttpRequest::new("POST".to_string(), "/v1/responses".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"llama3"}"#.to_vec());
         assert_eq!(
             request_usage_model_name(&responses_request).as_deref(),
             Some("llama3")
@@ -523,13 +493,7 @@ mod tests {
 
     #[test]
     fn resolves_usage_model_name_for_vllm_model_routes() {
-        let request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/rerank".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"reranker"}"#.to_vec(),
-        };
+        let request = HttpRequest::new("POST".to_string(), "/rerank".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"reranker"}"#.to_vec());
 
         assert_eq!(
             request_usage_model_name(&request).as_deref(),
@@ -539,26 +503,14 @@ mod tests {
 
     #[test]
     fn resolves_model_name_from_top_level_json_field() {
-        let request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/api/generate".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"messages":[{"model":"inner"}],"model":"outer"}"#.to_vec(),
-        };
+        let request = HttpRequest::new("POST".to_string(), "/api/generate".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"messages":[{"model":"inner"}],"model":"outer"}"#.to_vec());
 
         assert_eq!(request_usage_model_name(&request).as_deref(), Some("outer"));
     }
 
     #[test]
     fn adds_usage_request_to_openai_streaming_calls() {
-        let mut request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/v1/chat/completions".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"llama3","stream":true,"messages":[]}"#.to_vec(),
-        };
+        let mut request = HttpRequest::new("POST".to_string(), "/v1/chat/completions".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"llama3","stream":true,"messages":[]}"#.to_vec());
         request
             .headers
             .insert("content-length".to_string(), request.body.len().to_string());
@@ -572,26 +524,14 @@ mod tests {
 
     #[test]
     fn leaves_non_streaming_openai_calls_unchanged() {
-        let mut request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/v1/chat/completions".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"llama3","stream":false,"messages":[]}"#.to_vec(),
-        };
+        let mut request = HttpRequest::new("POST".to_string(), "/v1/chat/completions".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"llama3","stream":false,"messages":[]}"#.to_vec());
 
         assert!(!ensure_openai_stream_usage(&mut request));
     }
 
     #[test]
     fn systemone_evaluate_usage_model_name_resolved() {
-        let request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"systemone/diy-jev-0.1.0","state":"test","questions":{"q1":{"type":"noul","instructions":"test"}}}"#.to_vec(),
-        };
+        let request = HttpRequest::new("POST".to_string(), "/".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"systemone/diy-jev-0.1.0","state":"test","questions":{"q1":{"type":"noul","instructions":"test"}}}"#.to_vec());
         assert_eq!(
             request_usage_model_name(&request).as_deref(),
             Some("systemone/diy-jev-0.1.0")
@@ -600,13 +540,7 @@ mod tests {
 
     #[test]
     fn systemone_evaluate_v1_usage_model_name_resolved() {
-        let request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/v1/evaluate".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"systemone/diy-jev-0.1.0","state":"test","questions":{"q1":{"type":"noul","instructions":"test"}}}"#.to_vec(),
-        };
+        let request = HttpRequest::new("POST".to_string(), "/v1/evaluate".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"systemone/diy-jev-0.1.0","state":"test","questions":{"q1":{"type":"noul","instructions":"test"}}}"#.to_vec());
         assert_eq!(
             request_usage_model_name(&request).as_deref(),
             Some("systemone/diy-jev-0.1.0")
@@ -615,13 +549,7 @@ mod tests {
 
     #[test]
     fn systemone_systemone_usage_model_name_resolved() {
-        let request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/v1/systemone".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"systemone/diy-jev-0.1.0","state":"test","questions":{"q1":{"type":"noul","instructions":"test"}}}"#.to_vec(),
-        };
+        let request = HttpRequest::new("POST".to_string(), "/v1/systemone".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"systemone/diy-jev-0.1.0","state":"test","questions":{"q1":{"type":"noul","instructions":"test"}}}"#.to_vec());
         assert_eq!(
             request_usage_model_name(&request).as_deref(),
             Some("systemone/diy-jev-0.1.0")
@@ -630,13 +558,7 @@ mod tests {
 
     #[test]
     fn systemone_ai_run_usage_model_name_resolved() {
-        let request = HttpRequest {
-            method: "POST".to_string(),
-            uri: "/ai/run".to_string(),
-            protocol: "HTTP/1.1".to_string(),
-            headers: Default::default(),
-            body: br#"{"model":"systemone/diy-jev-0.1.0","state":"test","questions":{"q1":{"type":"noul","instructions":"test"}}}"#.to_vec(),
-        };
+        let request = HttpRequest::new("POST".to_string(), "/ai/run".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"systemone/diy-jev-0.1.0","state":"test","questions":{"q1":{"type":"noul","instructions":"test"}}}"#.to_vec());
         assert_eq!(
             request_usage_model_name(&request).as_deref(),
             Some("systemone/diy-jev-0.1.0")

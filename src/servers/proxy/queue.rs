@@ -324,13 +324,7 @@ mod tests {
 
     fn task(uri: &str) -> ClientTask {
         ClientTask::new(
-            HttpRequest {
-                method: "POST".to_string(),
-                uri: uri.to_string(),
-                protocol: "HTTP/1.1".to_string(),
-                headers: Default::default(),
-                body: Vec::new(),
-            },
+            HttpRequest::new("POST".to_string(), uri.to_string(), "HTTP/1.1".to_string(), Default::default(), Vec::new()),
             ResponseTarget::Ignore,
             RequestContext::default(),
         )

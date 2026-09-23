@@ -34,13 +34,7 @@ pub fn post_worker_command(state: &AppState, request: &HttpRequest) -> HttpRespo
         }
     }
 
-    let synthetic = HttpRequest {
-        method: payload.command.hive_method().to_string(),
-        uri: "/".to_string(),
-        protocol: "HIVE".to_string(),
-        headers: Default::default(),
-        body: Vec::new(),
-    };
+    let synthetic = HttpRequest::hive(payload.command.hive_method(), "/");
 
     let task = ClientTask::new(synthetic, ResponseTarget::Ignore, RequestContext::default());
     if state
