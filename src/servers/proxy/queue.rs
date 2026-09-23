@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use crate::servers::proxy::models::client_task::ClientTask;
@@ -8,17 +8,23 @@ use crate::servers::proxy::models::queue_snapshot::QueueSnapshot;
 use crate::servers::worker::models::worker_backend::WorkerBackend;
 use crate::shared::log;
 
+/// Each `(model, kind)` model queue and each worker's node queue is an
+/// independently-locked `Arc<Mutex<VecDeque>>`. The outer `RwLock<HashMap>`
+/// only guards *membership* (which keys exist and their `Arc`s); it is held
+/// briefly to fetch/create/remove a key and is never held while the deque
+/// itself is locked. Two threads touching different keys therefore never
+/// contend, so dispatch is not serialized on a single global lock.
 pub struct RequestQueue {
-    model_queue: Mutex<HashMap<ModelQueueKey, VecDeque<ClientTask>>>,
-    node_queue: Mutex<HashMap<String, VecDeque<ClientTask>>>,
+    model_queue: RwLock<HashMap<ModelQueueKey, Arc<Mutex<VecDeque<ClientTask>>>>>,
+    node_queue: RwLock<HashMap<String, Arc<Mutex<VecDeque<ClientTask>>>>>,
     default_timeout: Duration,
 }
 
 impl Default for RequestQueue {
     fn default() -> Self {
         Self {
-            model_queue: Mutex::new(HashMap::new()),
-            node_queue: Mutex::new(HashMap::new()),
+            model_queue: RwLock::new(HashMap::new()),
+            node_queue: RwLock::new(HashMap::new()),
             default_timeout: Duration::from_secs(60),
         }
     }
@@ -31,11 +37,8 @@ impl RequestQueue {
         kind: ModelRouteKind,
         task: ClientTask,
     ) -> Result<(), &'static str> {
-        let mut guard = self
-            .model_queue
-            .lock()
-            .map_err(|_| "model queue poisoned")?;
         let queued_model = model.clone();
+        let deque = self.model_deque_for(&ModelQueueKey { model, kind })?;
         let request_id = task.id;
         let method = task.request.method.clone();
         let uri = task.request.uri.clone();
@@ -44,10 +47,8 @@ impl RequestQueue {
             .key_name
             .clone()
             .unwrap_or_else(|| "Unauthenticated".to_string());
-        guard
-            .entry(ModelQueueKey { model, kind })
-            .or_default()
-            .push_back(task);
+        let mut guard = deque.lock().map_err(|_| "model queue poisoned")?;
+        guard.push_back(task);
         log::info(format!(
             "queued request id={} user={} route=model:{} kind={} method={} uri={}",
             log::bold(request_id.to_string()),
@@ -70,8 +71,9 @@ impl RequestQueue {
             .clone()
             .unwrap_or_else(|| "Unauthenticated".to_string());
         let node_name = node.clone();
-        let mut guard = self.node_queue.lock().map_err(|_| "node queue poisoned")?;
-        guard.entry(node).or_default().push_back(task);
+        let deque = self.node_deque_for(&node)?;
+        let mut guard = deque.lock().map_err(|_| "node queue poisoned")?;
+        guard.push_back(task);
         log::info(format!(
             "queued request id={} user={} route=worker:{} method={} uri={}",
             log::bold(request_id.to_string()),
@@ -89,78 +91,182 @@ impl RequestQueue {
         backend: WorkerBackend,
         tags: &[String],
     ) -> Option<ClientTask> {
-        if let Ok(mut node_guard) = self.node_queue.lock() {
-            let mut remove_node_queue = false;
-            let mut selected_task = None;
-            if let Some(queue) = node_guard.get_mut(worker_name) {
-                expire_queue_tasks(
-                    queue,
-                    self.default_timeout,
-                    &mut Vec::new(),
-                    &format!("worker:{worker_name}"),
-                    true,
-                );
-                remove_node_queue = queue.is_empty();
-                if let Some(task) = queue.pop_front() {
-                    remove_node_queue = queue.is_empty();
-                    let wait = log::format_duration(task.queue_wait());
-                    log::info(format!(
-                        "dispatch request id={} worker={} route=targeted wait={}",
-                        log::bold(task.id.to_string()),
-                        log::bold(worker_name),
-                        log::bold(wait)
-                    ));
-                    selected_task = Some(task);
-                }
-            }
-            if remove_node_queue {
-                node_guard.remove(worker_name);
-            }
-            if selected_task.is_some() {
-                return selected_task;
-            }
+        // Node-targeted work first: this worker's own queue is preferred.
+        if let Some(task) = self.dequeue_node(worker_name) {
+            return Some(task);
         }
 
-        let Ok(mut model_guard) = self.model_queue.lock() else {
-            return None;
-        };
+        // Otherwise scan the model queues for a compatible (tag, kind).
         for tag in tags {
-            let Some(key) = next_compatible_key(&model_guard, backend, tag) else {
-                continue;
-            };
-            if let Some(queue) = model_guard.get_mut(&key) {
-                let mut selected_task = None;
-                expire_queue_tasks(
-                    queue,
-                    self.default_timeout,
-                    &mut Vec::new(),
-                    &format!("model:{} kind={}", key.model, key.kind.as_str()),
-                    true,
-                );
-                let mut remove_model_queue = queue.is_empty();
-                if let Some(task) = queue.pop_front() {
-                    remove_model_queue = queue.is_empty();
-                    let wait = log::format_duration(task.queue_wait());
-                    log::info(format!(
-                        "dispatch request id={} worker={} backend={} route=model:{} kind={} wait={}",
-                        log::bold(task.id.to_string()),
-                        log::bold(worker_name),
-                        log::bold(backend.as_str()),
-                        log::bold(tag),
-                        log::bold(key.kind.as_str()),
-                        log::bold(wait)
-                    ));
-                    selected_task = Some(task);
+            for kind in [
+                ModelRouteKind::OpenAiCompatible,
+                ModelRouteKind::OllamaNative,
+                ModelRouteKind::VllmSpecific,
+                ModelRouteKind::SystemOne,
+            ] {
+                if !kind.compatible_with(backend) {
+                    continue;
                 }
-                if remove_model_queue {
-                    model_guard.remove(&key);
-                }
-                if selected_task.is_some() {
-                    return selected_task;
+                let key = ModelQueueKey {
+                    model: tag.clone(),
+                    kind,
+                };
+                if let Some(selected) = self.dequeue_model_key(&key, worker_name, backend, tag) {
+                    return Some(selected);
                 }
             }
         }
         None
+    }
+
+    /// Pop one task from this worker's targeted queue, or `None` if it has no
+    /// dedicated queue (or its queue is empty). Expires stale tasks and
+    /// removes the key when empty — the same hygiene `dequeue_for_worker`
+    /// previously did under one lock, now scoped to this worker's queue only.
+    fn dequeue_node(&self, worker_name: &str) -> Option<ClientTask> {
+        let deque = {
+            let read = self.node_queue.read().ok()?;
+            read.get(worker_name).map(Arc::clone)
+        }?;
+        let mut guard = deque.lock().ok()?;
+        expire_queue_tasks(
+            &mut guard,
+            self.default_timeout,
+            &mut Vec::new(),
+            &format!("worker:{worker_name}"),
+            true,
+        );
+        let task = guard.pop_front();
+        if let Some(task) = &task {
+            let wait = log::format_duration(task.queue_wait());
+            log::info(format!(
+                "dispatch request id={} worker={} route=targeted wait={}",
+                log::bold(task.id.to_string()),
+                log::bold(worker_name),
+                log::bold(wait)
+            ));
+        }
+        let remove = guard.is_empty();
+        drop(guard);
+        if remove {
+            self.remove_node_key_if_empty(worker_name);
+        }
+        task
+    }
+
+    /// Pop one task from a specific `(model, kind)` queue if it is backend
+    /// compatible and non-empty. Expires stale tasks and removes the key when
+    /// empty. Returns `None` when nothing was decoratable from this key.
+    fn dequeue_model_key(
+        &self,
+        key: &ModelQueueKey,
+        worker_name: &str,
+        backend: WorkerBackend,
+        tag: &str,
+    ) -> Option<ClientTask> {
+        let deque = {
+            let read = self.model_queue.read().ok()?;
+            read.get(key).map(Arc::clone)
+        }?;
+        let mut guard = deque.lock().ok()?;
+        expire_queue_tasks(
+            &mut guard,
+            self.default_timeout,
+            &mut Vec::new(),
+            &format!("model:{} kind={}", key.model, key.kind.as_str()),
+            true,
+        );
+        let task = guard.pop_front()?;
+        let wait = log::format_duration(task.queue_wait());
+        log::info(format!(
+            "dispatch request id={} worker={} backend={} route=model:{} kind={} wait={}",
+            log::bold(task.id.to_string()),
+            log::bold(worker_name),
+            log::bold(backend.as_str()),
+            log::bold(tag),
+            log::bold(key.kind.as_str()),
+            log::bold(wait)
+        ));
+        let remove = guard.is_empty();
+        drop(guard);
+        if remove {
+            self.remove_model_key_if_empty(key);
+        }
+        Some(task)
+    }
+
+    /// Get the deque for a `(model, kind)` key, creating it if absent.
+    fn model_deque_for(
+        &self,
+        key: &ModelQueueKey,
+    ) -> Result<Arc<Mutex<VecDeque<ClientTask>>>, &'static str> {
+        let existing = self
+            .model_queue
+            .read()
+            .map_err(|_| "model queue poisoned")?
+            .get(key)
+            .map(Arc::clone);
+        match existing {
+            Some(deque) => Ok(deque),
+            None => {
+                let mut write = self
+                    .model_queue
+                    .write()
+                    .map_err(|_| "model queue poisoned")?;
+                Ok(write
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(VecDeque::new())))
+                    .clone())
+            }
+        }
+    }
+
+    /// Get the deque for a worker's node queue, creating it if absent.
+    fn node_deque_for(
+        &self,
+        worker_name: &str,
+    ) -> Result<Arc<Mutex<VecDeque<ClientTask>>>, &'static str> {
+        let existing = self
+            .node_queue
+            .read()
+            .map_err(|_| "node queue poisoned")?
+            .get(worker_name)
+            .map(Arc::clone);
+        match existing {
+            Some(deque) => Ok(deque),
+            None => {
+                let mut write = self
+                    .node_queue
+                    .write()
+                    .map_err(|_| "node queue poisoned")?;
+                Ok(write
+                    .entry(worker_name.to_string())
+                    .or_insert_with(|| Arc::new(Mutex::new(VecDeque::new())))
+                    .clone())
+            }
+        }
+    }
+
+    /// Remove a worker's node key from the index if its deque is still empty.
+    fn remove_node_key_if_empty(&self, worker_name: &str) {
+        if let Ok(mut write) = self.node_queue.write() {
+            if let Some(deque) = write.get(worker_name) {
+                if deque.lock().map(|guard| guard.is_empty()).unwrap_or(false) {
+                    write.remove(worker_name);
+                }
+            }
+        }
+    }
+
+    /// Remove a `(model, kind)` key from the index if its deque is still empty.
+    fn remove_model_key_if_empty(&self, key: &ModelQueueKey) {
+        if let Ok(mut write) = self.model_queue.write() {
+            if let Some(deque) = write.get(key) {
+                if deque.lock().map(|guard| guard.is_empty()).unwrap_or(false) {
+                    write.remove(key);
+                }
+            }
+        }
     }
 
     pub fn enqueue_to_node(
@@ -172,28 +278,46 @@ impl RequestQueue {
     }
 
     pub fn snapshot(&self) -> QueueSnapshot {
-        let model_queue = self
+        // Snapshot the Arcs under a brief read lock, then read each deque's
+        // length under its own lock so the index lock is never held while a
+        // deque is locked.
+        let model_entries = self
             .model_queue
-            .lock()
+            .read()
             .ok()
             .map(|guard| {
                 guard
                     .iter()
-                    .map(|(k, v)| (k.display(), v.len()))
-                    .collect::<HashMap<_, _>>()
+                    .map(|(k, deque)| (k.display(), Arc::clone(deque)))
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let node_queue = self
+        let model_queue = model_entries
+            .into_iter()
+            .map(|(key, deque)| {
+                let len = deque.lock().map(|guard| guard.len()).unwrap_or(0);
+                (key, len)
+            })
+            .collect::<HashMap<_, _>>();
+
+        let node_entries = self
             .node_queue
-            .lock()
+            .read()
             .ok()
             .map(|guard| {
                 guard
                     .iter()
-                    .map(|(k, v)| (k.clone(), v.len()))
-                    .collect::<HashMap<_, _>>()
+                    .map(|(k, deque)| (k.clone(), Arc::clone(deque)))
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let node_queue = node_entries
+            .into_iter()
+            .map(|(key, deque)| {
+                let len = deque.lock().map(|guard| guard.len()).unwrap_or(0);
+                (key, len)
+            })
+            .collect::<HashMap<_, _>>();
 
         QueueSnapshot {
             model_queue,
@@ -204,30 +328,70 @@ impl RequestQueue {
     pub fn expire_older_than(&self, max_age: Duration) -> Vec<ClientTask> {
         let mut expired = Vec::new();
 
-        if let Ok(mut guard) = self.model_queue.lock() {
-            guard.retain(|key, queue| {
-                expire_queue_tasks(
-                    queue,
-                    max_age,
-                    &mut expired,
-                    &format!("model:{} kind={}", key.model, key.kind.as_str()),
-                    false,
-                );
-                !queue.is_empty()
-            });
+        let model_entries = self
+            .model_queue
+            .read()
+            .ok()
+            .map(|guard| {
+                guard
+                    .iter()
+                    .map(|(k, deque)| (k.clone(), Arc::clone(deque)))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (key, deque) in model_entries {
+            let became_empty = {
+                let mut guard = deque.lock().ok();
+                match guard.as_mut() {
+                    Some(guard) => {
+                        expire_queue_tasks(
+                            guard,
+                            max_age,
+                            &mut expired,
+                            &format!("model:{} kind={}", key.model, key.kind.as_str()),
+                            false,
+                        );
+                        guard.is_empty()
+                    }
+                    None => false,
+                }
+            };
+            if became_empty {
+                self.remove_model_key_if_empty(&key);
+            }
         }
 
-        if let Ok(mut guard) = self.node_queue.lock() {
-            guard.retain(|worker, queue| {
-                expire_queue_tasks(
-                    queue,
-                    max_age,
-                    &mut expired,
-                    &format!("worker:{worker}"),
-                    false,
-                );
-                !queue.is_empty()
-            });
+        let node_entries = self
+            .node_queue
+            .read()
+            .ok()
+            .map(|guard| {
+                guard
+                    .iter()
+                    .map(|(k, deque)| (k.clone(), Arc::clone(deque)))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (worker, deque) in node_entries {
+            let became_empty = {
+                let mut guard = deque.lock().ok();
+                match guard.as_mut() {
+                    Some(guard) => {
+                        expire_queue_tasks(
+                            guard,
+                            max_age,
+                            &mut expired,
+                            &format!("worker:{worker}"),
+                            false,
+                        );
+                        guard.is_empty()
+                    }
+                    None => false,
+                }
+            };
+            if became_empty {
+                self.remove_node_key_if_empty(&worker);
+            }
         }
 
         expired
@@ -284,32 +448,6 @@ impl ModelQueueKey {
     fn display(&self) -> String {
         format!("{}:{}", self.kind.as_str(), self.model)
     }
-}
-
-fn next_compatible_key(
-    queues: &HashMap<ModelQueueKey, VecDeque<ClientTask>>,
-    backend: WorkerBackend,
-    model: &str,
-) -> Option<ModelQueueKey> {
-    [
-        ModelRouteKind::OpenAiCompatible,
-        ModelRouteKind::OllamaNative,
-        ModelRouteKind::VllmSpecific,
-        ModelRouteKind::SystemOne,
-    ]
-    .into_iter()
-    .find_map(|kind| {
-        if !kind.compatible_with(backend) {
-            return None;
-        }
-        let key = ModelQueueKey {
-            model: model.to_string(),
-            kind,
-        };
-        queues
-            .get(&key)
-            .and_then(|queue| (!queue.is_empty()).then_some(key))
-    })
 }
 
 #[cfg(test)]
@@ -526,5 +664,71 @@ mod tests {
                 )
                 .is_some()
         );
+    }
+
+    #[test]
+    fn concurrent_enqueue_dequeue_across_distinct_keys_lose_no_tasks() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::thread;
+
+        let queue = Arc::new(RequestQueue::default());
+        const KEYS: usize = 8;
+        const PER_KEY: usize = 50;
+
+        // Enqueue many tasks to KEYS distinct model keys from one thread each.
+        let producers: Vec<_> = (0..KEYS)
+            .map(|i| {
+                let queue = Arc::clone(&queue);
+                thread::spawn(move || {
+                    for n in 0..PER_KEY {
+                        let uri = format!("/key{i}/task{n}");
+                        queue
+                            .enqueue_model(
+                                format!("model-{i}"),
+                                ModelRouteKind::OpenAiCompatible,
+                                task(&uri),
+                            )
+                            .expect("enqueue");
+                    }
+                })
+            })
+            .collect();
+        for p in producers {
+            p.join().unwrap();
+        }
+
+        // Dequeue from KEYS distinct worker names concurrently; each worker can
+        // drain any OpenAiCompatible model queue, so all KEYS*PER_KEY tasks must
+        // come back exactly once across all consumers.
+        let total = Arc::new(AtomicUsize::new(0));
+        let consumers: Vec<_> = (0..KEYS)
+            .map(|i| {
+                let queue = Arc::clone(&queue);
+                let total = Arc::clone(&total);
+                thread::spawn(move || {
+                    let tags: Vec<String> =
+                        (0..KEYS).map(|m| format!("model-{m}")).collect();
+                    let mut drained = 0;
+                    loop {
+                        match queue.dequeue_for_worker(
+                            &format!("worker-{i}"),
+                            WorkerBackend::OllamaLegacy,
+                            &tags,
+                        ) {
+                            Some(_) => drained += 1,
+                            None => break,
+                        }
+                    }
+                    total.fetch_add(drained, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for c in consumers {
+            c.join().unwrap();
+        }
+
+        assert_eq!(total.load(Ordering::SeqCst), KEYS * PER_KEY);
+        assert!(queue.snapshot().model_queue.is_empty());
     }
 }
