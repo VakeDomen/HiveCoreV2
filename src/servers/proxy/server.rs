@@ -1,7 +1,6 @@
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::app::AppState;
@@ -16,6 +15,12 @@ use crate::shared::http::{
     HttpRequest, HttpResponse, ensure_openai_stream_usage, read_request, request_usage_model_name,
 };
 use crate::shared::log;
+use crate::shared::taskpool::GrowablePool;
+
+/// Evergreen workers parked in the proxy listener's pool.
+const PROXY_POOL_CORE: usize = 8;
+/// Worker stack size (KB) for proxy client connections.
+const PROXY_POOL_STACK_KB: usize = 512;
 
 pub fn run(state: Arc<AppState>) -> io::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", state.config.proxy_port))?;
@@ -23,11 +28,12 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
         "client listener bound on 0.0.0.0:{}",
         state.config.proxy_port
     ));
+    let pool = GrowablePool::new(PROXY_POOL_CORE, PROXY_POOL_STACK_KB);
     for connection in listener.incoming() {
         let state = Arc::clone(&state);
         match connection {
             Ok(stream) => {
-                thread::spawn(move || {
+                pool.spawn(move || {
                     let _ = handle_connection(state, stream);
                 });
             }

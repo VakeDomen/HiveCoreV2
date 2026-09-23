@@ -1,14 +1,19 @@
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::app::{AppState, authorize_management};
-use crate::auth::{KeyRecord, Role};
+use crate::auth::Role;
 use crate::servers::management::routes;
 use crate::shared::http::{HttpResponse, read_request};
 use crate::shared::log;
+use crate::shared::taskpool::GrowablePool;
+
+/// Evergreen workers parked in the management listener's pool.
+const MANAGEMENT_POOL_CORE: usize = 4;
+/// Worker stack size (KB) for management connections.
+const MANAGEMENT_POOL_STACK_KB: usize = 512;
 
 pub fn run(state: Arc<AppState>) -> io::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", state.config.management_connection_port))?;
@@ -16,11 +21,12 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
         "management listener bound on 0.0.0.0:{}",
         state.config.management_connection_port
     ));
+    let pool = GrowablePool::new(MANAGEMENT_POOL_CORE, MANAGEMENT_POOL_STACK_KB);
     for connection in listener.incoming() {
         let state = Arc::clone(&state);
         match connection {
             Ok(stream) => {
-                thread::spawn(move || {
+                pool.spawn(move || {
                     let _ = handle_connection(state, stream);
                 });
             }
