@@ -279,7 +279,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "workers failed to decay below {grown}"
             );
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(5));
         }
     }
 }
