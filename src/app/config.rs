@@ -65,6 +65,11 @@ impl Config {
                         config.working_node_connection_timeout = parsed;
                     }
                 }
+                ("Connection", "LATENCY_REPORT_TIMEOUT") => {
+                    if let Ok(parsed) = value.parse() {
+                        config.latency_report_timeout = parsed;
+                    }
+                }
                 ("Connection", "PROXY_TIMEOUT_MS") => {
                     if let Ok(parsed) = value.parse() {
                         config.proxy_timeout_ms = parsed;
@@ -136,13 +141,14 @@ impl Config {
             self.default_rate_limit_tier
         ));
         format!(
-            "[Server]\nUSER_AUTHENTICATION = {}\nPROXY_PORT = {}\nNODE_CONNECTION_PORT = {}\nMANAGEMENT_CONNECTION_PORT = {}\n\n[Connection]\nPOLLING_NODE_CONNECTION_TIMEOUT = {}\nWORKING_NODE_CONNECTION_TIMEOUT = {}\nPROXY_TIMEOUT_MS = {}\nMESSAGE_CHUNK_BUFFER_SIZE = {}\n\n[Database]\nDATABASE_URL = {}\n\n[Capture]\nCAPTURE_DIR = {}\n\n[Telegram]\nBOT_TOKEN = {}\nUSER_ID = {}",
+            "[Server]\nUSER_AUTHENTICATION = {}\nPROXY_PORT = {}\nNODE_CONNECTION_PORT = {}\nMANAGEMENT_CONNECTION_PORT = {}\n\n[Connection]\nPOLLING_NODE_CONNECTION_TIMEOUT = {}\nWORKING_NODE_CONNECTION_TIMEOUT = {}\nLATENCY_REPORT_TIMEOUT = {}\nPROXY_TIMEOUT_MS = {}\nMESSAGE_CHUNK_BUFFER_SIZE = {}\n\n[Database]\nDATABASE_URL = {}\n\n[Capture]\nCAPTURE_DIR = {}\n\n[Telegram]\nBOT_TOKEN = {}\nUSER_ID = {}",
             self.user_authentication,
             self.proxy_port,
             self.node_connection_port,
             self.management_connection_port,
             self.polling_node_connection_timeout,
             self.working_node_connection_timeout,
+            self.latency_report_timeout,
             self.proxy_timeout_ms,
             self.message_chunk_buffer_size,
             self.database_url,

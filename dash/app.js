@@ -969,6 +969,14 @@ function renderWorkers() {
         const models = state.data.tags[name] || [];
         const load = workerLoad(name);
         const pollMs = Number(ping.last_poll_ms);
+        const coreMs = Number(ping.core_to_node_rtt_latency);
+        const hasLatency = Number.isFinite(coreMs) && ping.core_to_node_rtt_latency !== null;
+        const latencyStale = ping.latency_stale === true;
+        const backendMs = ping.node_to_backend_rtt_latency;
+        const hasBackend = Number.isFinite(backendMs) && backendMs !== null;
+        const latencyHtml = hasLatency
+          ? `<span class="worker-latency ${latencyStale ? "latency-stale" : ""}" title="last report ${formatMs(ping.latency_age_ms)} ago">rtt ${formatMs(ping.core_to_node_rtt_latency)}${hasBackend ? ` · backend ${formatMs(backendMs)}` : ""}${latencyStale ? " · stale" : ""}</span>`
+          : "";
         return `
         <article class="worker-card ${load.className}">
           <div class="worker-card-head">
@@ -980,6 +988,7 @@ function renderWorkers() {
           </div>
           <div class="worker-foot">
             <span>${load.working}/${load.total} working</span>
+            ${latencyHtml}
             ${Number.isFinite(pollMs) && pollMs > 10_000 ? `<span>poll ${formatMs(pollMs)}</span>` : ""}
           </div>
           <div class="worker-models">${tags(models)}</div>
@@ -1047,6 +1056,15 @@ function workerLoadClass(percent) {
 
 function overviewWorkerCard(name) {
   const load = workerLoad(name);
+  const ping = state.data.pings[name] || {};
+  const coreMs = Number(ping.core_to_node_rtt_latency);
+  const hasLatency = Number.isFinite(coreMs) && ping.core_to_node_rtt_latency !== null;
+  const latencyStale = ping.latency_stale === true;
+  const backendMs = ping.node_to_backend_rtt_latency;
+  const hasBackend = Number.isFinite(backendMs) && backendMs !== null;
+  const latencyHtml = hasLatency
+    ? `<span class="overview-worker-latency ${latencyStale ? "latency-stale" : ""}">rtt ${formatMs(ping.core_to_node_rtt_latency)}${hasBackend ? ` · backend ${formatMs(backendMs)}` : ""}${latencyStale ? " · stale" : ""}</span>`
+    : "";
   return `
     <article class="overview-worker-card ${load.className}">
       <div class="overview-worker-head">
@@ -1056,6 +1074,7 @@ function overviewWorkerCard(name) {
       <div class="worker-bar" title="${load.working}/${load.total} working">
         <span style="width: ${load.percent}%"></span>
       </div>
+      ${latencyHtml}
     </article>
   `;
 }

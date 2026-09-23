@@ -96,6 +96,66 @@ Current recognized worker commands:
 
 `PONG` is handled as a no-op keepalive.
 
+## Latency Echo (opt-in, backwards compatible)
+
+Nodes may measure their round-trip latency to HiveCore without any shared clock.
+The feature is opt-in from the node's side, so older HiveNode builds are
+unaffected.
+
+The latency probe uses a **dedicated control method, `LATENCY`**, so it can
+never be confused with the `-` / model-name URI convention of the `POLL*`
+methods — those semantics apply only to polling frames, never to a `LATENCY`
+frame.
+
+To probe, send a `LATENCY` frame whose URI is a token:
+
+```text
+LATENCY <echo-token> HIVE\r\n
+```
+
+HiveCore immediately replies with the token echoed back (only the bare token,
+never anything appended to it):
+
+```text
+PONG <echo-token> HIVE\r\n
+```
+
+The node times the send-to-receive round trip to obtain the true machine ↔
+proxy RTT.
+
+A node may report its most recently measured latencies back to HiveCore by
+appending `;`-separated millisecond values to the URI. The report is positional:
+
+```text
+LATENCY <echo-token>[;<core-node-ms>[;<node-backend-ms>]] HIVE\r\n
+```
+
+- `;12` — one number: the **core↔node** round trip (12 ms), exactly as before.
+- `;12;3` — two numbers: the **core↔node** round trip (12 ms) and the
+  **node↔backend** round trip (3 ms, the node to its local inference backend).
+
+HiveCore records both and exposes them through the management API
+(`GET /worker/pings`):
+
+- `core_to_node_rtt_latency` — the core↔node round trip in ms (`null` when the
+  node does not support the opt-in latency echo).
+- `node_to_backend_rtt_latency` — the node↔backend round trip in ms (`null`
+  when the node reports only the core↔node leg).
+- `latency_age_ms` — how long ago (in ms) the report was received (`null` when
+  never reported).
+- `latency_stale` — `true` when `latency_age_ms` exceeds the configured
+  `LATENCY_REPORT_TIMEOUT` (default 30 s), i.e. the stored values should not be
+  trusted as current.
+
+The report is carried in the URI because HIVE control frames are parsed
+line-oriented (only the request line is read), so headers and bodies are not
+available on control frames. HiveCore echoes only `<echo-token>` back — never
+the report suffixes — so the node can validate the reply matches exactly what
+it sent.
+
+Old nodes never send `LATENCY`, so both latency fields are `null` for them and
+`PING` keeps its original pure-keepalive behavior.
+
 ## Inbound Proxied HTTP Messages
 
 Non-`HIVE` messages are treated as proxied Ollama requests.

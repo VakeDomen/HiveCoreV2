@@ -33,6 +33,8 @@ pub struct Config {
     pub management_connection_port: u16,
     pub polling_node_connection_timeout: u64,
     pub working_node_connection_timeout: u64,
+    /// Seconds after which a node-reported latency is considered stale.
+    pub latency_report_timeout: u64,
     pub proxy_timeout_ms: u64,
     pub message_chunk_buffer_size: usize,
     pub database_url: String,
@@ -88,6 +90,7 @@ impl Default for Config {
             management_connection_port: 6668,
             polling_node_connection_timeout: 10,
             working_node_connection_timeout: 300,
+            latency_report_timeout: 30,
             proxy_timeout_ms: 60_000,
             message_chunk_buffer_size: 16_384,
             database_url: "sqlite.db".to_string(),

@@ -13,6 +13,17 @@ pub struct WorkerConnectionStatus {
     pub state: WorkerPhase,
     pub last_ping: Instant,
     pub last_poll: Instant,
+    /// Most recent core->node round-trip latency in milliseconds, as reported
+    /// by the node (opt-in latency echo). `None` when the node does not
+    /// advertise latency support (backwards compatible).
+    pub core_to_node_rtt_latency: Option<u64>,
+    /// Most recent node->backend round-trip latency in milliseconds (the node
+    /// to its local inference backend), as reported by the node. `None` when
+    /// the node reports only the core<->node leg.
+    pub node_to_backend_rtt_latency: Option<u64>,
+    /// When the latency report was last received. `None` when never reported,
+    /// so a just-reported value can be told apart from a stale one.
+    pub latency_reported_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -25,6 +36,15 @@ pub struct WorkerStatus {
     pub state: WorkerPhase,
     pub last_ping: Instant,
     pub last_poll: Instant,
+    /// Most recent node-reported core<->node round-trip latency in
+    /// milliseconds (opt-in).
+    pub core_to_node_rtt_latency: Option<u64>,
+    /// Most recent node-reported node->backend round-trip latency in
+    /// milliseconds (opt-in).
+    pub node_to_backend_rtt_latency: Option<u64>,
+    /// When the latency report was last received (worker-level summary,
+    /// mirrors the most recently active connection).
+    pub latency_reported_at: Option<Instant>,
     pub connections: Vec<WorkerConnectionStatus>,
     pub next_connection_index: u64,
     pub model_catalog: Option<Value>,
@@ -43,6 +63,9 @@ impl WorkerStatus {
             state: WorkerPhase::Authenticating,
             last_ping: Instant::now(),
             last_poll: Instant::now(),
+            core_to_node_rtt_latency: None,
+            node_to_backend_rtt_latency: None,
+            latency_reported_at: None,
         });
         self.sync_summary();
         index
@@ -112,6 +135,9 @@ impl WorkerStatus {
             self.tags = connection.tags.clone();
             self.last_ping = connection.last_ping;
             self.last_poll = connection.last_poll;
+            self.core_to_node_rtt_latency = connection.core_to_node_rtt_latency;
+            self.node_to_backend_rtt_latency = connection.node_to_backend_rtt_latency;
+            self.latency_reported_at = connection.latency_reported_at;
         }
     }
 }

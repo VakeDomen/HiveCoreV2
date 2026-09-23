@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde_json::{Value, json};
 
 use crate::app::AppState;
@@ -53,6 +55,7 @@ fn render_workers(state: &AppState) -> Value {
 }
 
 fn render_worker_pings(state: &AppState) -> Value {
+    let stale_after = Duration::from_secs(state.config.latency_report_timeout);
     let entries = state
         .workers
         .read()
@@ -61,11 +64,29 @@ fn render_worker_pings(state: &AppState) -> Value {
             guard
                 .values()
                 .map(|worker| {
+                    // Age of the last latency report in ms; null when the node
+                    // never reported a latency (no opt-in LATENCY support).
+                    let latency_age_ms = worker
+                        .latency_reported_at
+                        .map(|reported_at| reported_at.elapsed().as_millis());
+                    let latency_stale = latency_age_ms
+                        .map(|age_ms| Duration::from_millis(age_ms as u64) > stale_after)
+                        .unwrap_or(false);
                     (
                         worker.name.clone(),
                         json!({
                             "last_ping_ms": worker.last_ping.elapsed().as_millis(),
-                            "last_poll_ms": worker.last_poll.elapsed().as_millis()
+                            "last_poll_ms": worker.last_poll.elapsed().as_millis(),
+                            // Node-reported core<->node round-trip in ms.
+                            // null when the node does not support the opt-in latency echo.
+                            "core_to_node_rtt_latency": worker.core_to_node_rtt_latency,
+                            // Node-reported node->backend round-trip in ms.
+                            // null when the node reports only the core<->node leg.
+                            "node_to_backend_rtt_latency": worker.node_to_backend_rtt_latency,
+                            // How long ago the latency was reported, in ms.
+                            "latency_age_ms": latency_age_ms,
+                            // True when the latency report is older than LATENCY_REPORT_TIMEOUT.
+                            "latency_stale": latency_stale,
                         }),
                     )
                 })
@@ -185,7 +206,7 @@ mod tests {
     use crate::servers::worker::models::worker_phase::WorkerPhase;
     use crate::servers::worker::models::worker_status::{WorkerConnectionStatus, WorkerStatus};
 
-    use super::render_worker_connections;
+    use super::{render_worker_connections, render_worker_pings};
 
     fn temp_db_path(test_name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -223,6 +244,9 @@ mod tests {
                     state: WorkerPhase::Working,
                     last_ping: Instant::now(),
                     last_poll: Instant::now(),
+                    core_to_node_rtt_latency: Some(12),
+                    node_to_backend_rtt_latency: Some(3),
+                    latency_reported_at: Some(Instant::now()),
                     connections: vec![WorkerConnectionStatus {
                         index: 0,
                         nonce: "nonce".to_string(),
@@ -230,6 +254,9 @@ mod tests {
                         state: WorkerPhase::Working,
                         last_ping: Instant::now(),
                         last_poll: Instant::now(),
+                        core_to_node_rtt_latency: Some(12),
+                        node_to_backend_rtt_latency: Some(3),
+                        latency_reported_at: Some(Instant::now()),
                     }],
                     next_connection_index: 1,
                     model_catalog: None,
@@ -249,6 +276,73 @@ mod tests {
             Some(1)
         );
         assert_eq!(worker.get("backend").and_then(Value::as_str), Some("vllm"));
+
+        let _ = std::fs::remove_file(db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn pings_report_latency_age_and_staleness() -> io::Result<()> {
+        let db_path = temp_db_path("pings_stale");
+        let (stats_tx, _stats_rx) = std::sync::mpsc::channel();
+        let (capture_tx, _capture_rx) = std::sync::mpsc::channel();
+        let state = AppState::new(
+            Config {
+                database_url: db_path.to_string_lossy().into_owned(),
+                latency_report_timeout: 1, // 1s stale threshold
+                ..Config::default()
+            },
+            stats_tx,
+            capture_tx,
+        )?;
+
+        let reported_far_past = Instant::now() - std::time::Duration::from_secs(60);
+        state
+            .workers
+            .write()
+            .map_err(|_| io::Error::other("worker registry poisoned"))?
+            .insert(
+                "worker-a".to_string(),
+                WorkerStatus {
+                    name: "worker-a".to_string(),
+                    hive_version: "core".to_string(),
+                    backend_version: "backend".to_string(),
+                    backend: WorkerBackend::Ollama,
+                    tags: Vec::new(),
+                    state: WorkerPhase::Polling,
+                    last_ping: Instant::now(),
+                    last_poll: Instant::now(),
+                    core_to_node_rtt_latency: Some(12),
+                    node_to_backend_rtt_latency: Some(4),
+                    latency_reported_at: Some(reported_far_past),
+                    connections: vec![],
+                    next_connection_index: 1,
+                    model_catalog: None,
+                    running_models: None,
+                    version_payload: None,
+                },
+            );
+
+        let rendered = render_worker_pings(&state);
+        let worker = rendered
+            .get("worker-a")
+            .and_then(Value::as_object)
+            .expect("worker entry");
+
+        assert_eq!(
+            worker.get("core_to_node_rtt_latency").and_then(Value::as_u64),
+            Some(12)
+        );
+        assert_eq!(
+            worker.get("node_to_backend_rtt_latency").and_then(Value::as_u64),
+            Some(4)
+        );
+        let age_ms = worker
+            .get("latency_age_ms")
+            .and_then(Value::as_u64)
+            .expect("latency_age_ms should be present");
+        assert!(age_ms >= 1000, "age should be >= the 1s stale threshold, got {age_ms}ms");
+        assert_eq!(worker.get("latency_stale").and_then(Value::as_bool), Some(true));
 
         let _ = std::fs::remove_file(db_path);
         Ok(())

@@ -80,14 +80,18 @@ fn handle_connection(state: Arc<AppState>, stream: TcpStream) -> io::Result<()> 
                 &mut writer,
                 &mut reader,
             )?,
-            "PING" => touch_worker(
+            "PING" => handle_ping(
                 &state,
                 &worker_name,
                 connection_index,
-                None,
-                WorkerPhase::Polling,
-                None,
             ),
+            "LATENCY" => handle_latency(
+                &state,
+                &worker_name,
+                connection_index,
+                &request,
+                &mut writer,
+            )?,
             _ => touch_worker(
                 &state,
                 &worker_name,
@@ -95,9 +99,112 @@ fn handle_connection(state: Arc<AppState>, stream: TcpStream) -> io::Result<()> 
                 None,
                 WorkerPhase::Polling,
                 None,
+                None,
             ),
         }
     }
+}
+
+/// Handle a node keepalive `PING`. This preserves prior behavior exactly: it
+/// just refreshes the connection's last-ping timestamp and sends no reply.
+///
+/// A latency-aware node may piggyback its most recently measured round-trip
+/// time via the `x-hive-latency-ms` header, which we record and expose through
+/// the management API. Older nodes never send the header, so this is opt-in
+/// and backwards compatible.
+fn handle_ping(
+    state: &Arc<AppState>,
+    worker_name: &str,
+    connection_index: u64,
+) {
+    touch_worker(
+        state,
+        worker_name,
+        connection_index,
+        None,
+        WorkerPhase::Polling,
+        None,
+        None,
+    );
+}
+
+/// Answer a node's explicit latency probe.
+///
+/// The echo is a dedicated control method and must not be confused with the
+/// `-` / model-name URI convention used by the `POLL*` methods: those semantics
+/// only ever apply to polling frames, never to a `LATENCY` frame, so there is
+/// no ambiguity. Because older nodes never send `LATENCY`, the feature is opt-in
+/// from the node's side and fully backwards compatible.
+///
+/// Wire format: `LATENCY <echo-token>[;<core-node-ms>[;<node-backend-ms>]] HIVE`
+///
+/// * `<echo-token>` is echoed straight back as `PONG <echo-token>` so the node
+///   can time the send->receive round trip — the true machine <-> proxy RTT.
+///   HiveCore only ever echoes the token, never the report suffixes, so the
+///   node can validate the reply matches what it sent.
+/// * `<core-node-ms>` is the node's most recent measured core<->node round
+///   trip (the first number, exactly as before).
+/// * `<node-backend-ms>` is the node's most recent measured node->backend round
+///   trip (optional second number), e.g. to its local inference backend.
+///
+/// The report is carried in the URI because HIVE frames are parsed
+/// line-oriented (only the request line is read), so headers are not available
+/// on control frames.
+fn handle_latency(
+    state: &Arc<AppState>,
+    worker_name: &str,
+    connection_index: u64,
+    request: &HttpRequest,
+    writer: &mut TcpStream,
+) -> io::Result<()> {
+    let (token, latency) = parse_latency_uri(&request.uri);
+
+    touch_worker(
+        state,
+        worker_name,
+        connection_index,
+        None,
+        WorkerPhase::Polling,
+        None,
+        latency,
+    );
+
+    // Echo the probe token straight back (never the report suffixes) so the
+    // node can time the round trip and validate the token match.
+    let pong = HttpRequest::hive("PONG", token.as_str());
+    let bytes = serialize_request(&pong);
+    write_framed_request(writer, &bytes)
+}
+
+/// A node-reported latency report: the core<->node round trip (always present
+/// in a report) and, when reported, the node->backend round trip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NodeLatency {
+    core_to_node_ms: u64,
+    node_to_backend_ms: Option<u64>,
+}
+
+/// Split a `LATENCY` frame's URI of the form
+/// `<token>[;<core-node-ms>[;<node-backend-ms>]]` into its echo token and the
+/// node's reported latencies (if present and parseable as milliseconds).
+///
+/// Positional: the first number is the core<->node RTT, the second the
+/// node->backend RTT. A frame with no numbers yields `None`; a malformed or
+/// empty segment is treated as absent for that slot; anything after the second
+/// number is ignored (tolerant, forward-compatible).
+fn parse_latency_uri(uri: &str) -> (String, Option<NodeLatency>) {
+    let mut parts = uri.split(';');
+    let token = parts.next().unwrap_or("").to_string();
+    let core_to_node_ms = parts
+        .next()
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let latency = core_to_node_ms.map(|core_to_node_ms| NodeLatency {
+        core_to_node_ms,
+        node_to_backend_ms: parts
+            .next()
+            .and_then(|value| value.trim().parse::<u64>().ok()),
+    });
+    (token, latency)
 }
 
 fn authenticate_worker(
@@ -151,6 +258,9 @@ fn authenticate_worker(
                 state: WorkerPhase::Authenticating,
                 last_ping: Instant::now(),
                 last_poll: Instant::now(),
+                core_to_node_rtt_latency: None,
+                node_to_backend_rtt_latency: None,
+                latency_reported_at: None,
                 connections: Vec::new(),
                 next_connection_index: 0,
                 model_catalog: None,
@@ -177,6 +287,7 @@ fn authenticate_worker(
         connection_index,
         None,
         WorkerPhase::Polling,
+        None,
         None,
     );
     log::info(format!(
@@ -215,6 +326,7 @@ fn handle_poll(
         incoming_tags,
         WorkerPhase::Polling,
         Some(backend),
+        None,
     );
 
     let tags = state
@@ -240,6 +352,7 @@ fn handle_poll(
             connection_index,
             None,
             WorkerPhase::Working,
+            None,
             None,
         );
         let key_id = task.context.key_id;
@@ -425,6 +538,7 @@ fn handle_poll(
             connection_index,
             None,
             WorkerPhase::Polling,
+            None,
             None,
         );
         let total_time = queue_wait + worker_time;
@@ -865,22 +979,28 @@ fn touch_worker(
     tags: Option<Vec<String>>,
     phase: WorkerPhase,
     worker_backend: Option<WorkerBackend>,
+    latency: Option<NodeLatency>,
 ) {
     if let Ok(mut guard) = state.workers.write() {
         if let Some(worker) = guard.get_mut(worker_name) {
-            if let Some(connection) = worker.connection_mut(connection_index) {
+            {
+                let Some(connection) = worker.connection_mut(connection_index) else {
+                    return;
+                };
                 if let Some(tags) = tags {
                     connection.tags = tags;
                 }
                 connection.state = phase;
                 connection.last_ping = Instant::now();
                 connection.last_poll = Instant::now();
-
-                if let Some(worker_backend) = worker_backend {
-                    worker.backend = worker_backend;
+                if let Some(latency) = latency {
+                    connection.core_to_node_rtt_latency = Some(latency.core_to_node_ms);
+                    connection.node_to_backend_rtt_latency = latency.node_to_backend_ms;
+                    connection.latency_reported_at = Some(Instant::now());
                 }
-            } else {
-                return;
+            }
+            if let Some(worker_backend) = worker_backend {
+                worker.backend = worker_backend;
             }
             worker.sync_summary();
         }
@@ -939,8 +1059,8 @@ mod tests {
     use crate::shared::http::TokenUsage;
 
     use super::{
-        ResponseCaptureBuilder, parse_chunk_size, proxy_worker_response,
-        proxy_worker_response_with_capture,
+        NodeLatency, ResponseCaptureBuilder, parse_chunk_size, parse_latency_uri,
+        proxy_worker_response, proxy_worker_response_with_capture,
     };
 
     #[test]
@@ -1142,5 +1262,96 @@ mod tests {
     fn parse_chunk_size_accepts_extensions() -> io::Result<()> {
         assert_eq!(parse_chunk_size("a;foo=bar\r\n")?, 10);
         Ok(())
+    }
+
+    #[test]
+    fn latency_method_is_distinct_from_poll_model_uri_semantics() {
+        // The `-` / model-name URI convention belongs only to the POLL* methods
+        // (WorkerBackend::from_poll_method). A dedicated LATENCY method cannot
+        // collide with it: POLL parsing maps only POLL* methods, and PING/LATENCY
+        // are never treated as model-tag frames.
+        use crate::servers::worker::models::worker_backend::WorkerBackend;
+        assert_eq!(WorkerBackend::from_poll_method("PING"), None);
+        assert_eq!(WorkerBackend::from_poll_method("LATENCY"), None);
+        assert_eq!(WorkerBackend::from_poll_method("POLL"), Some(WorkerBackend::OllamaLegacy));
+    }
+
+    #[test]
+    fn latency_uri_splits_token_and_reported_rtts() {
+        // Token only -> no report.
+        assert_eq!(
+            parse_latency_uri("echo-token"),
+            ("echo-token".to_string(), None)
+        );
+        // One number -> core<->node RTT only.
+        assert_eq!(
+            parse_latency_uri("echo-token;42"),
+            (
+                "echo-token".to_string(),
+                Some(NodeLatency {
+                    core_to_node_ms: 42,
+                    node_to_backend_ms: None,
+                })
+            )
+        );
+        // Two numbers -> core<->node and node->backend RTTs.
+        assert_eq!(
+            parse_latency_uri("t0;12;3"),
+            (
+                "t0".to_string(),
+                Some(NodeLatency {
+                    core_to_node_ms: 12,
+                    node_to_backend_ms: Some(3),
+                })
+            )
+        );
+        // Malformed number(s) -> ignored for that slot (tolerant).
+        assert_eq!(
+            parse_latency_uri("echo-token;abc"),
+            ("echo-token".to_string(), None)
+        );
+        assert_eq!(
+            parse_latency_uri("echo-token;12;abc"),
+            (
+                "echo-token".to_string(),
+                Some(NodeLatency {
+                    core_to_node_ms: 12,
+                    node_to_backend_ms: None,
+                })
+            )
+        );
+        // Empty middle segment -> treated as absent core RTT, no report.
+        assert_eq!(
+            parse_latency_uri("echo-token;;3"),
+            ("echo-token".to_string(), None)
+        );
+        // Trailing `;` -> token kept, no report.
+        assert_eq!(
+            parse_latency_uri("echo-token;"),
+            ("echo-token".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn latency_pong_echo_never_includes_reported_rtt_suffix() {
+        // The node reports RTTs via `;core;backend`, but HiveCore must echo only
+        // the token so the node can validate the reply matches exactly.
+        let (token, latency) = parse_latency_uri("abc;7;2");
+        assert_eq!(token, "abc");
+        assert_eq!(
+            latency,
+            Some(NodeLatency {
+                core_to_node_ms: 7,
+                node_to_backend_ms: Some(2),
+            })
+        );
+
+        let pong = crate::shared::http::HttpRequest::hive("PONG", token.as_str());
+        let bytes = crate::shared::http::serialize_request(&pong);
+        assert_eq!(
+            String::from_utf8_lossy(&bytes),
+            "PONG abc HIVE\r\n",
+            "the echoed PONG must carry the bare token, not the rtt suffix"
+        );
     }
 }

@@ -1460,6 +1460,17 @@ main {
     font-weight: 700;
 }
 
+.overview-worker-latency {
+    color: var(--muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.overview-worker-latency.latency-stale {
+    color: var(--warn);
+    font-weight: 600;
+}
+
 .overview-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -1902,6 +1913,15 @@ main {
 .worker-foot {
     color: var(--muted);
     font-size: 12px;
+}
+
+.worker-latency {
+    font-variant-numeric: tabular-nums;
+}
+
+.worker-latency.latency-stale {
+    color: var(--warn);
+    font-weight: 600;
 }
 
 .worker-bar {
