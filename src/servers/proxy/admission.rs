@@ -155,24 +155,24 @@ fn request_models(request: &HttpRequest) -> Vec<String> {
         | ("POST", "/v1/evaluate")
         | ("POST", "/v1/systemone")
         | ("POST", "/ai/run") => {
-            if let Some(model) = extract_json_value(&request.body, "model") {
+            if let Some(model) = extract_json_value(request, "model") {
                 models.push(model);
             }
         }
         ("POST", "/api/show") => {
-            if let Some(model) = extract_json_value(&request.body, "model")
-                .or_else(|| extract_json_value(&request.body, "name"))
+            if let Some(model) = extract_json_value(request, "model")
+                .or_else(|| extract_json_value(request, "name"))
             {
                 models.push(model);
             }
         }
         ("POST", "/api/copy") => {
-            if let Some(source) = extract_json_value(&request.body, "source") {
+            if let Some(source) = extract_json_value(request, "source") {
                 models.push(source);
             }
         }
         ("POST", "/api/create") => {
-            if let Some(from) = extract_json_value(&request.body, "from") {
+            if let Some(from) = extract_json_value(request, "from") {
                 models.push(from);
             }
         }

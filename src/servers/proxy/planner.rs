@@ -229,7 +229,7 @@ fn classify_endpoint(request: &HttpRequest) -> ProxyEndpoint {
 }
 
 fn route_openai_model_request(request: &HttpRequest) -> RoutePlan {
-    match json_string_field(&request.body, "model") {
+    match json_string_field(request, "model") {
         Some(model) => RoutePlan::QueueByModel {
             model,
             kind: ModelRouteKind::OpenAiCompatible,
@@ -370,7 +370,7 @@ fn local_openai_model_response(
 }
 
 fn route_systemone_eval_request(state: &AppState, request: &HttpRequest) -> RoutePlan {
-    match json_string_field(&request.body, "model") {
+    match json_string_field(request, "model") {
         Some(model) => RoutePlan::QueueByModel {
             model,
             kind: ModelRouteKind::SystemOne,
@@ -380,7 +380,7 @@ fn route_systemone_eval_request(state: &AppState, request: &HttpRequest) -> Rout
 }
 
 fn route_by_required_model(request: &HttpRequest, kind: ModelRouteKind) -> RoutePlan {
-    match json_string_field(&request.body, "model") {
+    match json_string_field(request, "model") {
         Some(model) => RoutePlan::QueueByModel { model, kind },
         None => missing_field("model"),
     }
@@ -391,8 +391,8 @@ fn route_show_request(
     request: &HttpRequest,
     visible_key: Option<&KeyRecord>,
 ) -> RoutePlan {
-    let Some(model) = json_string_field(&request.body, "model")
-        .or_else(|| json_string_field(&request.body, "name"))
+    let Some(model) = json_string_field(request, "model")
+        .or_else(|| json_string_field(request, "name"))
     else {
         return missing_field("model");
     };
@@ -411,7 +411,7 @@ fn route_create_request(
     request: &HttpRequest,
     visible_key: Option<&KeyRecord>,
 ) -> RoutePlan {
-    let Some(from) = json_string_field(&request.body, "from") else {
+    let Some(from) = json_string_field(request, "from") else {
         return RoutePlan::Reject {
             status: 400,
             reason: "Bad Request",
@@ -429,7 +429,7 @@ fn route_copy_request(
     request: &HttpRequest,
     visible_key: Option<&KeyRecord>,
 ) -> RoutePlan {
-    let Some(source) = json_string_field(&request.body, "source") else {
+    let Some(source) = json_string_field(request, "source") else {
         return missing_field("source");
     };
     if !model_visible(visible_key, &source) {
@@ -451,7 +451,7 @@ fn route_push_request(
     request: &HttpRequest,
     visible_key: Option<&KeyRecord>,
 ) -> RoutePlan {
-    let Some(model) = json_string_field(&request.body, "model") else {
+    let Some(model) = json_string_field(request, "model") else {
         return missing_field("model");
     };
     if !model_visible(visible_key, &model) {
@@ -465,7 +465,7 @@ fn route_delete_request(
     request: &HttpRequest,
     visible_key: Option<&KeyRecord>,
 ) -> RoutePlan {
-    let Some(model) = json_string_field(&request.body, "model") else {
+    let Some(model) = json_string_field(request, "model") else {
         return missing_field("model");
     };
     if !model_visible(visible_key, &model) {
@@ -667,10 +667,12 @@ fn model_visible(key: Option<&KeyRecord>, model: &str) -> bool {
     key.map(|key| key.allows_model(model)).unwrap_or(true)
 }
 
-fn json_string_field(body: &[u8], field: &str) -> Option<String> {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|value| value.get(field).and_then(Value::as_str).map(str::to_string))
+fn json_string_field(request: &HttpRequest, field: &str) -> Option<String> {
+    request
+        .parsed_json()?
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn json_response(value: Value) -> HttpResponse {

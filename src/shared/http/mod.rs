@@ -75,7 +75,7 @@ pub fn request_usage_model_name(request: &HttpRequest) -> Option<String> {
         | ("POST", "/")
         | ("POST", "/v1/evaluate")
         | ("POST", "/v1/systemone")
-        | ("POST", "/ai/run") => extract_json_value(&request.body, "model"),
+        | ("POST", "/ai/run") => extract_json_value(request, "model"),
         _ => None,
     }
 }
@@ -127,41 +127,6 @@ pub fn ensure_openai_stream_usage(request: &mut HttpRequest) -> bool {
         .headers
         .insert("content-length".to_string(), request.body.len().to_string());
     true
-}
-
-pub fn request_model_name(request: &HttpRequest) -> Option<String> {
-    match (request.method.as_str(), request.uri.as_str()) {
-        ("POST", "/api/generate")
-        | ("POST", "/api/chat")
-        | ("POST", "/api/embed")
-        | ("POST", "/api/embeddings")
-        | ("POST", "/v1/chat/completions")
-        | ("POST", "/v1/chat/completions/batch")
-        | ("POST", "/v1/completions")
-        | ("POST", "/v1/responses")
-        | ("POST", "/v1/embeddings")
-        | ("POST", "/v2/embed")
-        | ("POST", "/score")
-        | ("POST", "/v1/score")
-        | ("POST", "/rerank")
-        | ("POST", "/v1/rerank")
-        | ("POST", "/v2/rerank")
-        | ("POST", "/tokenize")
-        | ("POST", "/detokenize")
-        | ("POST", "/api/pull")
-        | ("POST", "/api/push")
-        | ("DELETE", "/api/delete")
-        | ("POST", "/generative_scoring")
-        | ("POST", "/")
-        | ("POST", "/v1/evaluate")
-        | ("POST", "/v1/systemone")
-        | ("POST", "/ai/run") => extract_json_value(&request.body, "model"),
-        ("POST", "/api/show") => extract_json_value(&request.body, "model")
-            .or_else(|| extract_json_value(&request.body, "name")),
-        ("POST", "/api/copy") => extract_json_value(&request.body, "source"),
-        ("POST", "/api/create") => extract_json_value(&request.body, "from"),
-        _ => None,
-    }
 }
 
 fn parse_usage_value(text: &str) -> Option<TokenUsage> {
@@ -363,21 +328,22 @@ pub fn serialize_request(request: &HttpRequest) -> Vec<u8> {
     bytes
 }
 
-pub fn extract_json_value(body: &[u8], field: &str) -> Option<String> {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .get(field)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
+/// Read a top-level string field from a request's body as JSON.
+///
+/// Uses the request's memoized `parsed_json` cache so the body is parsed at
+/// most once even when several routing/usage steps inspect different fields.
+pub fn extract_json_value(request: &HttpRequest, field: &str) -> Option<String> {
+    request
+        .parsed_json()?
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        HttpRequest, TokenUsage, ensure_openai_stream_usage, parse_usage_json, request_model_name,
+        HttpRequest, TokenUsage, ensure_openai_stream_usage, extract_json_value, parse_usage_json,
         request_usage_model_name,
     };
 
@@ -460,20 +426,6 @@ mod tests {
     }
 
     #[test]
-    fn resolves_request_model_name_for_supported_routes() {
-        let request = HttpRequest::new("POST".to_string(), "/api/copy".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"source":"base-model","destination":"copy"}"#.to_vec());
-
-        assert_eq!(request_model_name(&request).as_deref(), Some("base-model"));
-    }
-
-    #[test]
-    fn resolves_show_model_name_from_name_field() {
-        let request = HttpRequest::new("POST".to_string(), "/api/show".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"name":"llama3"}"#.to_vec());
-
-        assert_eq!(request_model_name(&request).as_deref(), Some("llama3"));
-    }
-
-    #[test]
     fn resolves_usage_model_name_only_for_inference_routes() {
         let show_request = HttpRequest::new("POST".to_string(), "/api/show".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"llama3"}"#.to_vec());
         let chat_request = HttpRequest::new("POST".to_string(), "/v1/chat/completions".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"llama3"}"#.to_vec());
@@ -506,6 +458,41 @@ mod tests {
         let request = HttpRequest::new("POST".to_string(), "/api/generate".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"messages":[{"model":"inner"}],"model":"outer"}"#.to_vec());
 
         assert_eq!(request_usage_model_name(&request).as_deref(), Some("outer"));
+    }
+
+    #[test]
+    fn usage_model_name_excludes_model_management_routes() {
+        // Usage accounting intentionally skips /api/pull, /api/push and
+        // /api/delete: they manage models rather than run inference, so no
+        // tokens are consumed. Admission routing (request_models) DOES include
+        // these routes for policy, so this drift is intentional.
+        for uri in ["/api/pull", "/api/push", "/api/delete"] {
+            let method = if uri == "/api/delete" { "DELETE" } else { "POST" };
+            let request = HttpRequest::new(
+                method.to_string(),
+                uri.to_string(),
+                "HTTP/1.1".to_string(),
+                Default::default(),
+                br#"{"model":"llama3"}"#.to_vec(),
+            );
+            assert_eq!(
+                request_usage_model_name(&request),
+                None,
+                "usage should not attribute tokens for {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_and_create_routes_use_source_and_from_fields() {
+        // These routes derive the model from a different field than "model";
+        // the memoized cache lets both the shared extractor and the planner
+        // read the same single parse.
+        let copy = HttpRequest::new("POST".to_string(), "/api/copy".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"source":"base-model","destination":"copy"}"#.to_vec());
+        let create = HttpRequest::new("POST".to_string(), "/api/create".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"from":"base-model"}"#.to_vec());
+
+        assert_eq!(extract_json_value(&copy, "source").as_deref(), Some("base-model"));
+        assert_eq!(extract_json_value(&create, "from").as_deref(), Some("base-model"));
     }
 
     #[test]

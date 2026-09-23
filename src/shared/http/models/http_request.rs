@@ -1,12 +1,48 @@
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::OnceLock;
 
-#[derive(Clone, Debug)]
 pub struct HttpRequest {
     pub method: String,
     pub uri: String,
     pub protocol: String,
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
+    /// Memoized parse of `body` as JSON, computed at most once per request.
+    ///
+    /// `None` once computed means the body did not parse as a JSON object
+    /// (or was empty). Cloning a request resets the cache so a clone does
+    /// not deep-copy a potentially large `Value` into capture paths.
+    parsed_json: OnceLock<Option<serde_json::Value>>,
+}
+
+impl Clone for HttpRequest {
+    fn clone(&self) -> Self {
+        Self {
+            method: self.method.clone(),
+            uri: self.uri.clone(),
+            protocol: self.protocol.clone(),
+            headers: self.headers.clone(),
+            body: self.body.clone(),
+            // Reset the memoized parse: a clone (e.g. into capture) should not
+            // carry a deep copy of the parsed body.
+            parsed_json: OnceLock::new(),
+        }
+    }
+}
+
+impl fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("uri", &self.uri)
+            .field("protocol", &self.protocol)
+            .field("headers", &self.headers)
+            // body is binary; only expose its length, mirroring prior behavior
+            // where Debug printed the full byte slice.
+            .field("body", &self.body)
+            .finish()
+    }
 }
 
 impl HttpRequest {
@@ -24,6 +60,7 @@ impl HttpRequest {
             protocol: protocol.into(),
             headers,
             body,
+            parsed_json: OnceLock::new(),
         }
     }
 
@@ -58,6 +95,17 @@ impl HttpRequest {
         }
 
         self.header("api-key")
+    }
+
+    /// Parse the request body as a JSON value, memoizing the result.
+    ///
+    /// The first call parses `body` once; later calls return the cached value,
+    /// so a non-JSON or empty body is also parsed at most once (returning
+    /// `None` each time).
+    pub fn parsed_json(&self) -> Option<&serde_json::Value> {
+        self.parsed_json
+            .get_or_init(|| serde_json::from_slice(&self.body).ok())
+            .as_ref()
     }
 }
 
@@ -108,5 +156,68 @@ mod tests {
     fn bearer_token_returns_none_without_auth() {
         let req = request_with(vec![]);
         assert_eq!(req.bearer_token(), None);
+    }
+
+    #[test]
+    fn parsed_json_memoizes_and_parses_object_fields() {
+        let req = HttpRequest::new(
+            "POST",
+            "/api/generate",
+            "HTTP/1.1",
+            HashMap::new(),
+            br#"{"model":"llama3","name":"other"}"#.to_vec(),
+        );
+        // Memoized: repeated calls return the same parsed value.
+        assert_eq!(req.parsed_json().is_some(), true);
+        let model = req.parsed_json().and_then(|v| v.get("model")).and_then(serde_json::Value::as_str);
+        assert_eq!(model, Some("llama3"));
+        // Same parsed value across calls (memoization should not re-parse).
+        let again = req.parsed_json();
+        assert!(std::ptr::eq(req.parsed_json().unwrap(), again.unwrap()));
+        // Different field reads share the single parse.
+        let name = req.parsed_json().and_then(|v| v.get("name")).and_then(serde_json::Value::as_str);
+        assert_eq!(name, Some("other"));
+    }
+
+    #[test]
+    fn parsed_json_returns_none_for_non_json_body() {
+        let req = HttpRequest::new(
+            "POST",
+            "/api/generate",
+            "HTTP/1.1",
+            HashMap::new(),
+            b"not json".to_vec(),
+        );
+        assert_eq!(req.parsed_json(), None);
+        // Second call stays None (cached miss, not re-parsed).
+        assert_eq!(req.parsed_json(), None);
+    }
+
+    #[test]
+    fn parsed_json_returns_none_for_empty_body() {
+        let req = HttpRequest::new("POST", "/api/generate", "HTTP/1.1", HashMap::new(), Vec::new());
+        assert_eq!(req.parsed_json(), None);
+    }
+
+    #[test]
+    fn clone_resets_parsed_json_cache() {
+        let req = HttpRequest::new(
+            "POST",
+            "/api/generate",
+            "HTTP/1.1",
+            HashMap::new(),
+            br#"{"model":"llama3"}"#.to_vec(),
+        );
+        // Populate the cache on the original.
+        let _ = req.parsed_json();
+        // The clone must carry an unfilled cache, so it parses independently.
+        let cloned = req.clone();
+        assert_eq!(
+            cloned
+                .parsed_json()
+                .and_then(|v| v.get("model"))
+                .and_then(serde_json::Value::as_str),
+            Some("llama3")
+        );
     }
 }
