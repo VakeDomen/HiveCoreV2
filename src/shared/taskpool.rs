@@ -238,8 +238,17 @@ mod tests {
 
     #[test]
     fn decays_back_toward_core_after_idle() {
-        let pool = GrowablePool::with_idle_timeout(1, 256, Duration::from_millis(80));
-        // Grow the pool with a burst of concurrent work.
+        // Use a long idle timeout so the post-burst worker count is stably
+        // observable BEFORE any decay can start. With a short timeout (old test
+        // used 80ms) the extra workers retire almost instantly after the last
+        // job completes, so a fixed-sleep "grown" read races the decay and
+        // flakes under scheduler load (visible only when the suite runs in
+        // parallel). A long timeout removes that race entirely.
+        let idle_timeout = Duration::from_millis(500);
+        let pool = GrowablePool::with_idle_timeout(1, 256, idle_timeout);
+
+        // Grow the pool with a burst of concurrently-blocking work. Each job
+        // signals just before finishing, so the burst forces worker growth.
         let (tx, rx) = mpsc::channel();
         for _ in 0..8 {
             let tx = tx.clone();
@@ -251,16 +260,26 @@ mod tests {
         for _ in 0..8 {
             let _ = rx.recv_timeout(Duration::from_secs(2));
         }
-        thread::sleep(Duration::from_millis(50));
+
+        // All 8 jobs are done. With a 500ms idle timeout the extra workers are
+        // still parked (they cannot have retired yet), so any count >= 2 is a
+        // stable observation of growth.
         let grown = pool.worker_count();
         assert!(grown >= 2, "expected growth before decay, got {grown}");
 
-        // Wait for the extra workers' idle timeout to elapse so they retire.
-        thread::sleep(Duration::from_millis(300));
-        let decayed = pool.worker_count();
-        assert!(
-            decayed < grown,
-            "expected decay from {grown}, got {decayed}"
-        );
+        // Now wait deterministically for the idle timeout to elapse so every
+        // extra worker must retire and the pool returns to its core size.
+        // Poll rather than fixed-sleep so this is robust to scheduler timing.
+        let deadline = std::time::Instant::now() + idle_timeout + Duration::from_secs(2);
+        loop {
+            if pool.worker_count() <= 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "workers failed to decay below {grown}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }
