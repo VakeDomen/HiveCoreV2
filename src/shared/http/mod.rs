@@ -313,8 +313,12 @@ pub fn read_request_from_reader<R: BufRead>(reader: &mut R) -> io::Result<HttpRe
 
 pub fn write_framed_request(stream: &mut TcpStream, request_bytes: &[u8]) -> io::Result<()> {
     let length = request_bytes.len() as u32;
-    stream.write_all(&length.to_be_bytes())?;
-    stream.write_all(request_bytes)?;
+
+    let mut frame = Vec::with_capacity(4 + request_bytes.len());
+    frame.extend_from_slice(&length.to_be_bytes());
+    frame.extend_from_slice(request_bytes);
+
+    stream.write_all(&frame)?;
     stream.flush()
 }
 

@@ -37,6 +37,8 @@ pub fn run(state: Arc<AppState>) -> io::Result<()> {
 }
 
 fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<()> {
+    stream.set_nodelay(true)?;
+
     stream.set_read_timeout(Some(Duration::from_millis(state.config.proxy_timeout_ms)))?;
     stream.set_write_timeout(Some(Duration::from_millis(state.config.proxy_timeout_ms)))?;
     let started_at = Instant::now();
@@ -91,10 +93,12 @@ fn handle_connection(state: Arc<AppState>, mut stream: TcpStream) -> io::Result<
 
     // Self-service /key/me routes — any valid key can access its own info.
     if route_path.starts_with("/key/me") {
-        let Some(key) = request
-            .bearer_token()
-            .and_then(|token| state.keys.verify(token, &[Role::Admin, Role::Client, Role::Analytics, Role::Worker]))
-        else {
+        let Some(key) = request.bearer_token().and_then(|token| {
+            state.keys.verify(
+                token,
+                &[Role::Admin, Role::Client, Role::Analytics, Role::Worker],
+            )
+        }) else {
             log::warn(format!(
                 "rejected /key/me request without valid key method={} uri={}",
                 request.method, request.uri
