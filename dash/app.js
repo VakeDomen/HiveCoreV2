@@ -939,7 +939,15 @@ function renderWorkers() {
   if (!state.managementRead) return;
   const names = workerNames()
     .filter((name) => workerMatchesModelFilter(name, state.workerModelFilter))
-    .sort((a, b) => a.localeCompare(b));
+    .sort((a, b) => {
+      const aLoad = workerLoad(a);
+      const bLoad = workerLoad(b);
+      return (
+        bLoad.working - aLoad.working ||
+        bLoad.percent - aLoad.percent ||
+        a.localeCompare(b)
+      );
+    });
 
   if (!names.length) {
     $("#workers-grid").innerHTML = state.workerModelFilter
@@ -966,6 +974,7 @@ function renderWorkers() {
         const connection = state.data.connections[name] || {};
         const ping = state.data.pings[name] || {};
         const version = state.data.versions[name] || {};
+        const hiveVersion = version.hive_version;
         const models = state.data.tags[name] || [];
         const load = workerLoad(name);
         const pollMs = Number(ping.last_poll_ms);
@@ -992,10 +1001,47 @@ function renderWorkers() {
             ${Number.isFinite(pollMs) && pollMs > 10_000 ? `<span>poll ${formatMs(pollMs)}</span>` : ""}
           </div>
           <div class="worker-models">${tags(models)}</div>
+          <div class="worker-bottom">
+            ${latencyVisualHtml(ping)}
+            <span class="worker-version" title="Hive node version">Hive <strong>${escapeHtml(hiveVersion || "-")}</strong></span>
+          </div>
         </article>
       `;
       })
       .join("")}
+  `;
+}
+
+function latencyVisualHtml(ping) {
+  ping = ping || {};
+  const coreMs = Number(ping.core_to_node_rtt_latency);
+  const hasCore = Number.isFinite(coreMs) && ping.core_to_node_rtt_latency !== null;
+  const backendMs = Number(ping.node_to_backend_rtt_latency);
+  const hasBackend = Number.isFinite(backendMs) && backendMs !== null;
+  const stale = ping.latency_stale === true;
+  if (!hasCore) return "";
+
+  const dotClass = (ms) => {
+    if (ms < 50) return "dot-good";
+    if (ms < 150) return "dot-mid";
+    return "dot-bad";
+  };
+  const coreDot = dotClass(coreMs);
+  const backendDot = hasBackend ? dotClass(backendMs) : "dot-na";
+  const backendVal = hasBackend ? formatMs(backendMs) : "—";
+  const staleCls = stale ? " latency-stale" : "";
+
+  return `
+    <div class="worker-latency-viz${staleCls}" title="last report ${formatMs(ping.latency_age_ms)} ago">
+      <span class="latency-leg">Core</span>
+      <span class="latency-dot ${coreDot}"></span>
+      <span class="latency-val">← ${formatMs(coreMs)} →</span>
+      <span class="latency-leg">Node</span>
+      <span class="latency-dot ${backendDot}"></span>
+      <span class="latency-val">← ${backendVal} →</span>
+      <span class="latency-leg">backend</span>
+      ${stale ? `<span class="latency-leg">· stale</span>` : ""}
+    </div>
   `;
 }
 

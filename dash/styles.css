@@ -1818,8 +1818,20 @@ main {
 
 .worker-grid {
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(3, 1fr);
     gap: 12px;
+}
+
+@media (max-width: 1200px) {
+    .worker-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 820px) {
+    .worker-grid {
+        grid-template-columns: 1fr;
+    }
 }
 
 .worker-summary,
@@ -1922,6 +1934,87 @@ main {
 .worker-latency.latency-stale {
     color: var(--warn);
     font-weight: 600;
+}
+
+.worker-latency-viz {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.worker-latency-viz .latency-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    box-shadow: 0 0 0 2px var(--panel);
+}
+
+.worker-latency-viz .latency-leg {
+    color: var(--soft-strong, #8a94a6);
+}
+
+.worker-latency-viz .latency-val {
+    color: var(--muted);
+}
+
+.worker-latency-viz.latency-stale {
+    opacity: 0.55;
+}
+
+.worker-bottom {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.worker-bottom .worker-latency-viz {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.worker-version {
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--soft);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 2px 8px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.worker-version strong {
+    color: var(--accent-strong);
+    font-weight: 600;
+}
+
+.worker-latency-viz .latency-dot.dot-good {
+    background: #12b886;
+    box-shadow: 0 0 6px 0 rgba(18, 184, 134, 0.55);
+}
+
+.worker-latency-viz .latency-dot.dot-mid {
+    background: #e2a03f;
+    box-shadow: 0 0 6px 0 rgba(226, 160, 63, 0.55);
+}
+
+.worker-latency-viz .latency-dot.dot-bad {
+    background: #f05250;
+    box-shadow: 0 0 6px 0 rgba(240, 82, 80, 0.55);
+}
+
+.worker-latency-viz .latency-dot.dot-na {
+    background: #c5ccd6;
 }
 
 .worker-bar {

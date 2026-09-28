@@ -264,14 +264,16 @@ pub fn read_request(stream: &TcpStream) -> io::Result<HttpRequest> {
 pub fn read_request_from_reader<R: BufRead>(reader: &mut R) -> io::Result<HttpRequest> {
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
-    if request_line.trim().is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "empty request line",
-        ));
-    }
-    let parts: Vec<_> = request_line.trim_end().split_whitespace().collect();
+
+    let parts: Vec<&str> = request_line.trim().split_whitespace().collect();
     if parts.len() != 3 {
+        if parts.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "empty request line",
+            ));
+        }
+
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid request line",
@@ -279,8 +281,7 @@ pub fn read_request_from_reader<R: BufRead>(reader: &mut R) -> io::Result<HttpRe
     }
 
     let mut headers = HashMap::new();
-    let protocol = parts[2].to_string();
-    if protocol != "HIVE" {
+    if parts[2] != "HIVE" {
         loop {
             let mut line = String::new();
             reader.read_line(&mut line)?;
@@ -295,7 +296,7 @@ pub fn read_request_from_reader<R: BufRead>(reader: &mut R) -> io::Result<HttpRe
     }
 
     let mut body = Vec::new();
-    if protocol != "HIVE" {
+    if parts[2] != "HIVE" {
         if let Some(content_length) = headers
             .get("content-length")
             .and_then(|value| value.parse::<usize>().ok())
@@ -306,11 +307,7 @@ pub fn read_request_from_reader<R: BufRead>(reader: &mut R) -> io::Result<HttpRe
     }
 
     Ok(HttpRequest::new(
-        parts[0].to_string(),
-        parts[1].to_string(),
-        protocol,
-        headers,
-        body,
+        parts[0], parts[1], parts[2], headers, body,
     ))
 }
 
@@ -439,8 +436,20 @@ mod tests {
 
     #[test]
     fn resolves_usage_model_name_only_for_inference_routes() {
-        let show_request = HttpRequest::new("POST".to_string(), "/api/show".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"llama3"}"#.to_vec());
-        let chat_request = HttpRequest::new("POST".to_string(), "/v1/chat/completions".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"llama3"}"#.to_vec());
+        let show_request = HttpRequest::new(
+            "POST".to_string(),
+            "/api/show".to_string(),
+            "HTTP/1.1".to_string(),
+            Default::default(),
+            br#"{"model":"llama3"}"#.to_vec(),
+        );
+        let chat_request = HttpRequest::new(
+            "POST".to_string(),
+            "/v1/chat/completions".to_string(),
+            "HTTP/1.1".to_string(),
+            Default::default(),
+            br#"{"model":"llama3"}"#.to_vec(),
+        );
 
         assert_eq!(request_usage_model_name(&show_request), None);
         assert_eq!(
@@ -448,7 +457,13 @@ mod tests {
             Some("llama3")
         );
 
-        let responses_request = HttpRequest::new("POST".to_string(), "/v1/responses".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"llama3"}"#.to_vec());
+        let responses_request = HttpRequest::new(
+            "POST".to_string(),
+            "/v1/responses".to_string(),
+            "HTTP/1.1".to_string(),
+            Default::default(),
+            br#"{"model":"llama3"}"#.to_vec(),
+        );
         assert_eq!(
             request_usage_model_name(&responses_request).as_deref(),
             Some("llama3")
@@ -457,7 +472,13 @@ mod tests {
 
     #[test]
     fn resolves_usage_model_name_for_vllm_model_routes() {
-        let request = HttpRequest::new("POST".to_string(), "/rerank".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"reranker"}"#.to_vec());
+        let request = HttpRequest::new(
+            "POST".to_string(),
+            "/rerank".to_string(),
+            "HTTP/1.1".to_string(),
+            Default::default(),
+            br#"{"model":"reranker"}"#.to_vec(),
+        );
 
         assert_eq!(
             request_usage_model_name(&request).as_deref(),
@@ -467,7 +488,13 @@ mod tests {
 
     #[test]
     fn resolves_model_name_from_top_level_json_field() {
-        let request = HttpRequest::new("POST".to_string(), "/api/generate".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"messages":[{"model":"inner"}],"model":"outer"}"#.to_vec());
+        let request = HttpRequest::new(
+            "POST".to_string(),
+            "/api/generate".to_string(),
+            "HTTP/1.1".to_string(),
+            Default::default(),
+            br#"{"messages":[{"model":"inner"}],"model":"outer"}"#.to_vec(),
+        );
 
         assert_eq!(request_usage_model_name(&request).as_deref(), Some("outer"));
     }
@@ -479,7 +506,11 @@ mod tests {
         // tokens are consumed. Admission routing (request_models) DOES include
         // these routes for policy, so this drift is intentional.
         for uri in ["/api/pull", "/api/push", "/api/delete"] {
-            let method = if uri == "/api/delete" { "DELETE" } else { "POST" };
+            let method = if uri == "/api/delete" {
+                "DELETE"
+            } else {
+                "POST"
+            };
             let request = HttpRequest::new(
                 method.to_string(),
                 uri.to_string(),
@@ -500,16 +531,40 @@ mod tests {
         // These routes derive the model from a different field than "model";
         // the memoized cache lets both the shared extractor and the planner
         // read the same single parse.
-        let copy = HttpRequest::new("POST".to_string(), "/api/copy".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"source":"base-model","destination":"copy"}"#.to_vec());
-        let create = HttpRequest::new("POST".to_string(), "/api/create".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"from":"base-model"}"#.to_vec());
+        let copy = HttpRequest::new(
+            "POST".to_string(),
+            "/api/copy".to_string(),
+            "HTTP/1.1".to_string(),
+            Default::default(),
+            br#"{"source":"base-model","destination":"copy"}"#.to_vec(),
+        );
+        let create = HttpRequest::new(
+            "POST".to_string(),
+            "/api/create".to_string(),
+            "HTTP/1.1".to_string(),
+            Default::default(),
+            br#"{"from":"base-model"}"#.to_vec(),
+        );
 
-        assert_eq!(extract_json_value(&copy, "source").as_deref(), Some("base-model"));
-        assert_eq!(extract_json_value(&create, "from").as_deref(), Some("base-model"));
+        assert_eq!(
+            extract_json_value(&copy, "source").as_deref(),
+            Some("base-model")
+        );
+        assert_eq!(
+            extract_json_value(&create, "from").as_deref(),
+            Some("base-model")
+        );
     }
 
     #[test]
     fn adds_usage_request_to_openai_streaming_calls() {
-        let mut request = HttpRequest::new("POST".to_string(), "/v1/chat/completions".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"llama3","stream":true,"messages":[]}"#.to_vec());
+        let mut request = HttpRequest::new(
+            "POST".to_string(),
+            "/v1/chat/completions".to_string(),
+            "HTTP/1.1".to_string(),
+            Default::default(),
+            br#"{"model":"llama3","stream":true,"messages":[]}"#.to_vec(),
+        );
         request
             .headers
             .insert("content-length".to_string(), request.body.len().to_string());
@@ -523,7 +578,13 @@ mod tests {
 
     #[test]
     fn leaves_non_streaming_openai_calls_unchanged() {
-        let mut request = HttpRequest::new("POST".to_string(), "/v1/chat/completions".to_string(), "HTTP/1.1".to_string(), Default::default(), br#"{"model":"llama3","stream":false,"messages":[]}"#.to_vec());
+        let mut request = HttpRequest::new(
+            "POST".to_string(),
+            "/v1/chat/completions".to_string(),
+            "HTTP/1.1".to_string(),
+            Default::default(),
+            br#"{"model":"llama3","stream":false,"messages":[]}"#.to_vec(),
+        );
 
         assert!(!ensure_openai_stream_usage(&mut request));
     }

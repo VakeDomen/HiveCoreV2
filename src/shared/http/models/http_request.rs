@@ -169,13 +169,19 @@ mod tests {
         );
         // Memoized: repeated calls return the same parsed value.
         assert_eq!(req.parsed_json().is_some(), true);
-        let model = req.parsed_json().and_then(|v| v.get("model")).and_then(serde_json::Value::as_str);
+        let model = req
+            .parsed_json()
+            .and_then(|v| v.get("model"))
+            .and_then(serde_json::Value::as_str);
         assert_eq!(model, Some("llama3"));
         // Same parsed value across calls (memoization should not re-parse).
         let again = req.parsed_json();
         assert!(std::ptr::eq(req.parsed_json().unwrap(), again.unwrap()));
         // Different field reads share the single parse.
-        let name = req.parsed_json().and_then(|v| v.get("name")).and_then(serde_json::Value::as_str);
+        let name = req
+            .parsed_json()
+            .and_then(|v| v.get("name"))
+            .and_then(serde_json::Value::as_str);
         assert_eq!(name, Some("other"));
     }
 
@@ -195,7 +201,13 @@ mod tests {
 
     #[test]
     fn parsed_json_returns_none_for_empty_body() {
-        let req = HttpRequest::new("POST", "/api/generate", "HTTP/1.1", HashMap::new(), Vec::new());
+        let req = HttpRequest::new(
+            "POST",
+            "/api/generate",
+            "HTTP/1.1",
+            HashMap::new(),
+            Vec::new(),
+        );
         assert_eq!(req.parsed_json(), None);
     }
 
