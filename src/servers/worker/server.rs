@@ -1,6 +1,7 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -300,6 +301,69 @@ fn authenticate_worker(
     Ok((worker_name, connection_index))
 }
 
+/// Bounds of the randomised window an idle poll is held open before it is
+/// answered with `PONG`.
+///
+/// The wait is jittered so a fleet of idle nodes does not answer in lockstep,
+/// and it stays small because the node — not the core — owns the retry
+/// cadence: the core only ever delays an *empty* reply.
+const IDLE_POLL_WAIT_MIN_MS: u64 = 5;
+const IDLE_POLL_WAIT_MAX_MS: u64 = 10;
+
+/// Uniform idle wait in `[IDLE_POLL_WAIT_MIN_MS, IDLE_POLL_WAIT_MAX_MS]`.
+fn idle_poll_wait() -> Duration {
+    Duration::from_millis(IDLE_POLL_WAIT_MIN_MS + next_random_u64() % idle_wait_span())
+}
+
+fn idle_wait_span() -> u64 {
+    IDLE_POLL_WAIT_MAX_MS - IDLE_POLL_WAIT_MIN_MS + 1
+}
+
+/// Xorshift64 state backing the idle-wait jitter.
+///
+/// The crate carries no `rand` dependency, and jitter only has to
+/// de-synchronise idle pollers — never anything where unpredictability
+/// matters — so a lock-free xorshift self-seeded from the wall clock is
+/// enough. Each call is one relaxed atomic, so the busy (work-available) path
+/// pays nothing at all.
+static IDLE_JITTER_STATE: AtomicU64 = AtomicU64::new(0);
+
+fn next_random_u64() -> u64 {
+    let mut observed = IDLE_JITTER_STATE.load(Ordering::Relaxed);
+    loop {
+        let mut next = if observed == 0 {
+            seed_idle_jitter()
+        } else {
+            observed
+        };
+        next ^= next << 13;
+        next ^= next >> 7;
+        next ^= next << 17;
+        if next == 0 {
+            next = 0x9e37_79b9_7f4a_7c15;
+        }
+        match IDLE_JITTER_STATE.compare_exchange_weak(
+            observed,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return next,
+            Err(current) => observed = current,
+        }
+    }
+}
+
+fn seed_idle_jitter() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos() as u64)
+        .unwrap_or(0);
+    // Spread the low clock bits across the word: xorshift64 needs a non-zero
+    // seed and behaves poorly on seeds with little entropy above bit 0.
+    nanos.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1
+}
+
 fn handle_poll(
     state: &Arc<AppState>,
     worker_name: &str,
@@ -342,10 +406,16 @@ fn handle_poll(
         })
         .unwrap_or_else(|| Vec::new());
 
-    if let Some(task) = state
-        .request_queue
-        .dequeue_for_worker(worker_name, backend, &tags)
-    {
+    // Work is answered immediately. An idle poll instead parks for a short
+    // randomised window and re-checks once before the `PONG`, so a request
+    // enqueued just after this poll rides the same frame out (and wakes the
+    // wait early) rather than waiting for the node's next poll.
+    if let Some(task) = state.request_queue.next_for_worker(
+        worker_name,
+        backend,
+        &tags,
+        idle_poll_wait(),
+    ) {
         touch_worker(
             state,
             worker_name,
@@ -1054,13 +1124,16 @@ fn parse_status_code(status_line: &str) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::io::{self, BufReader};
+    use std::time::Duration;
 
     use crate::shared::http::TokenUsage;
 
     use super::{
-        NodeLatency, ResponseCaptureBuilder, parse_chunk_size, parse_latency_uri,
-        proxy_worker_response, proxy_worker_response_with_capture,
+        IDLE_POLL_WAIT_MAX_MS, IDLE_POLL_WAIT_MIN_MS, NodeLatency, ResponseCaptureBuilder,
+        idle_poll_wait, parse_chunk_size, parse_latency_uri, proxy_worker_response,
+        proxy_worker_response_with_capture,
     };
 
     #[test]
@@ -1262,6 +1335,27 @@ mod tests {
     fn parse_chunk_size_accepts_extensions() -> io::Result<()> {
         assert_eq!(parse_chunk_size("a;foo=bar\r\n")?, 10);
         Ok(())
+    }
+
+    #[test]
+    fn idle_poll_wait_stays_within_bounds_and_varies() {
+        let mut observed = HashSet::new();
+        for _ in 0..512 {
+            let wait = idle_poll_wait();
+            assert!(
+                wait >= Duration::from_millis(IDLE_POLL_WAIT_MIN_MS),
+                "idle wait fell below the floor: {wait:?}"
+            );
+            assert!(
+                wait <= Duration::from_millis(IDLE_POLL_WAIT_MAX_MS),
+                "idle wait exceeded the ceiling: {wait:?}"
+            );
+            observed.insert(wait.as_millis());
+        }
+        assert!(
+            observed.len() > 1,
+            "jitter never produced more than one value: {observed:?}"
+        );
     }
 
     #[test]

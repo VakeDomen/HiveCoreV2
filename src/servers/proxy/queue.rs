@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
 use crate::servers::proxy::models::client_task::ClientTask;
@@ -18,6 +18,7 @@ pub struct RequestQueue {
     model_queue: RwLock<HashMap<ModelQueueKey, Arc<Mutex<VecDeque<ClientTask>>>>>,
     node_queue: RwLock<HashMap<String, Arc<Mutex<VecDeque<ClientTask>>>>>,
     default_timeout: Duration,
+    idle_gate: IdleGate,
 }
 
 impl Default for RequestQueue {
@@ -26,8 +27,22 @@ impl Default for RequestQueue {
             model_queue: RwLock::new(HashMap::new()),
             node_queue: RwLock::new(HashMap::new()),
             default_timeout: Duration::from_secs(60),
+            idle_gate: IdleGate::default(),
         }
     }
+}
+
+/// Wakes pollers parked in [`RequestQueue::wait_for_work`].
+///
+/// `generation` is bumped by every enqueue. A poller observes it *before* its
+/// dequeue attempt, so an enqueue that lands in the gap between the failed
+/// dequeue and the wait cannot be missed: [`RequestQueue::wait_for_work`]
+/// returns immediately whenever the generation has moved past what the caller
+/// observed.
+#[derive(Default)]
+struct IdleGate {
+    generation: Mutex<u64>,
+    woken: Condvar,
 }
 
 impl RequestQueue {
@@ -58,6 +73,11 @@ impl RequestQueue {
             method,
             uri
         ));
+        // Wake parked pollers only once the task is visible and the enqueue is
+        // logged; the deque lock is released first so a woken poller can take
+        // it immediately.
+        drop(guard);
+        self.notify_work_available();
         Ok(())
     }
 
@@ -82,7 +102,85 @@ impl RequestQueue {
             method,
             uri
         ));
+        // See `enqueue_model`: notify after the task is visible and logged.
+        drop(guard);
+        self.notify_work_available();
         Ok(())
+    }
+
+    /// Current idle generation.
+    ///
+    /// Take this *before* attempting a dequeue and hand it to
+    /// [`Self::wait_for_work`]: an enqueue that races the attempt then still
+    /// wakes the caller instead of stranding the new task until the next poll.
+    fn idle_mark(&self) -> u64 {
+        *self.lock_generation()
+    }
+
+    /// Park the calling thread until work is enqueued, or until `timeout`
+    /// elapses — whichever comes first.
+    ///
+    /// Returns immediately if the generation has moved past `seen`, which is
+    /// what makes the mark → dequeue → wait sequence race-free rather than a
+    /// blind sleep that can miss a wakeup.
+    fn wait_for_work(&self, seen: u64, timeout: Duration) {
+        let generation = self.lock_generation();
+        let (generation, _) = self
+            .idle_gate
+            .woken
+            .wait_timeout_while(generation, timeout, |generation| *generation == seen)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        drop(generation);
+    }
+
+    fn lock_generation(&self) -> MutexGuard<'_, u64> {
+        self.idle_gate
+            .generation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Bump the generation and wake every parked poller.
+    ///
+    /// Called once the task is visible in its queue, so a woken poller either
+    /// takes it or correctly finds the queue empty again (another poller won
+    /// the race). Waking every poller rather than one is deliberate: the
+    /// woken thread may poll for a backend or tag set that cannot serve the
+    /// new task, and the task must not wait a whole idle window for a
+    /// compatible worker's timeout.
+    fn notify_work_available(&self) {
+        {
+            let mut generation = self.lock_generation();
+            *generation = generation.wrapping_add(1);
+        }
+        self.idle_gate.woken.notify_all();
+    }
+
+    /// Dequeue work for one poll; if the queue is empty, park for at most
+    /// `idle_wait` and check once more before giving up.
+    ///
+    /// A poller answers work immediately, but an empty poll is held open for a
+    /// short randomised window rather than answered at once: a request that
+    /// lands just after the poll then rides the same frame out. The mark is
+    /// taken *before* the first attempt (see [`Self::idle_mark`]), so work
+    /// enqueued in the gap still wakes the wait instead of being stranded
+    /// until the next poll, and an enqueue wakes it early.
+    ///
+    /// Returns `None` only when both attempts came up empty — the caller
+    /// answers `PONG`.
+    pub fn next_for_worker(
+        &self,
+        worker_name: &str,
+        backend: WorkerBackend,
+        tags: &[String],
+        idle_wait: Duration,
+    ) -> Option<ClientTask> {
+        let idle_mark = self.idle_mark();
+        if let Some(task) = self.dequeue_for_worker(worker_name, backend, tags) {
+            return Some(task);
+        }
+        self.wait_for_work(idle_mark, idle_wait);
+        self.dequeue_for_worker(worker_name, backend, tags)
     }
 
     pub fn dequeue_for_worker(
@@ -458,6 +556,8 @@ mod tests {
     use crate::servers::proxy::models::response_target::ResponseTarget;
     use crate::servers::worker::models::worker_backend::WorkerBackend;
     use crate::shared::http::HttpRequest;
+    use std::sync::Arc;
+    use std::thread;
     use std::time::{Duration, Instant};
 
     fn task(uri: &str) -> ClientTask {
@@ -468,11 +568,166 @@ mod tests {
         )
     }
 
+    fn enqueue_openai_work(queue: &RequestQueue, uri: &str) {
+        queue
+            .enqueue_model(
+                "llama3".to_string(),
+                ModelRouteKind::OpenAiCompatible,
+                task(uri),
+            )
+            .expect("enqueue");
+    }
+
+    #[test]
+    fn idle_mark_taken_before_the_dequeue_still_sees_a_racing_enqueue() {
+        // This is exactly the ordering `handle_poll` uses: observe the
+        // generation, attempt a dequeue, and only then park. Work enqueued
+        // after the mark but before the wait must return the wait at once —
+        // otherwise the task would sit until the next poll.
+        let queue = RequestQueue::default();
+        let mark = queue.idle_mark();
+        enqueue_openai_work(&queue, "/v1/chat/completions");
+
+        let started = Instant::now();
+        queue.wait_for_work(mark, Duration::from_secs(5));
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "wait ignored an enqueue that beat it to the gate"
+        );
+        assert!(
+            queue
+                .dequeue_for_worker(
+                    "worker-a",
+                    WorkerBackend::OllamaLegacy,
+                    &["llama3".to_string()]
+                )
+                .is_some(),
+            "the task that woke the poller must be dispatchable"
+        );
+    }
+
+    #[test]
+    fn idle_wait_wakes_a_parked_poller_when_work_arrives() {
+        let queue = Arc::new(RequestQueue::default());
+        let mark = queue.idle_mark();
+        let waiter = {
+            let queue = Arc::clone(&queue);
+            thread::spawn(move || {
+                let started = Instant::now();
+                queue.wait_for_work(mark, Duration::from_secs(5));
+                started.elapsed()
+            })
+        };
+
+        // Let the poller park before the enqueue that must wake it.
+        thread::sleep(Duration::from_millis(20));
+        enqueue_openai_work(&queue, "/v1/chat/completions");
+
+        let elapsed = waiter.join().expect("waiter thread");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "parked poller was not woken by the enqueue (waited {elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn idle_wait_honors_its_timeout_when_nothing_arrives() {
+        let queue = RequestQueue::default();
+        let mark = queue.idle_mark();
+
+        let started = Instant::now();
+        queue.wait_for_work(mark, Duration::from_millis(20));
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_millis(10),
+            "wait returned before its timeout (elapsed {elapsed:?})"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "wait overshot its timeout (elapsed {elapsed:?})"
+        );
+    }
+
     fn timed_task(uri: &str, queue_timeout: Duration, age: Duration) -> ClientTask {
         let mut task = task(uri);
         task.context.queue_timeout = Some(queue_timeout);
         task.queued_at = Instant::now() - age;
         task
+    }
+
+    #[test]
+    fn next_for_worker_answers_queued_work_without_waiting() {
+        let queue = RequestQueue::default();
+        enqueue_openai_work(&queue, "/v1/chat/completions");
+
+        let started = Instant::now();
+        let task = queue.next_for_worker(
+            "worker-a",
+            WorkerBackend::OllamaLegacy,
+            &["llama3".to_string()],
+            Duration::from_secs(5),
+        );
+
+        assert!(task.is_some(), "queued work was not dispatched");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "a poll with work available must not park first"
+        );
+    }
+
+    #[test]
+    fn next_for_worker_rechecks_and_takes_work_enqueued_during_the_window() {
+        let queue = Arc::new(RequestQueue::default());
+        let enqueuer = {
+            let queue = Arc::clone(&queue);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(20));
+                enqueue_openai_work(&queue, "/v1/chat/completions");
+            })
+        };
+
+        let started = Instant::now();
+        let task = queue.next_for_worker(
+            "worker-a",
+            WorkerBackend::OllamaLegacy,
+            &["llama3".to_string()],
+            Duration::from_secs(5),
+        );
+        let elapsed = started.elapsed();
+
+        enqueuer.join().expect("enqueuer thread");
+        let task = task.expect("work enqueued during the idle window must be dispatched");
+        assert_eq!(task.request.uri, "/v1/chat/completions");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "mid-window enqueue was not picked up early (waited {elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn next_for_worker_gives_up_after_the_idle_window() {
+        let queue = RequestQueue::default();
+
+        let started = Instant::now();
+        let task = queue.next_for_worker(
+            "worker-a",
+            WorkerBackend::OllamaLegacy,
+            &["llama3".to_string()],
+            Duration::from_millis(20),
+        );
+        let elapsed = started.elapsed();
+
+        assert!(task.is_none(), "an idle poll must not invent work");
+        assert!(
+            elapsed >= Duration::from_millis(10),
+            "idle poll skipped its re-check window (elapsed {elapsed:?})"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "idle poll overshot its re-check window (elapsed {elapsed:?})"
+        );
     }
 
     #[test]
@@ -668,9 +923,7 @@ mod tests {
 
     #[test]
     fn concurrent_enqueue_dequeue_across_distinct_keys_lose_no_tasks() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::thread;
 
         let queue = Arc::new(RequestQueue::default());
         const KEYS: usize = 8;
